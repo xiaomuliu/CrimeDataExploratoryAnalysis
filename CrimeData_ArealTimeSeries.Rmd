@@ -1,0 +1,333 @@
+---
+title: "Areal Time Series Analysis"
+date: "May 26, 2015"
+output: html_document
+---
+
+In this part, we aim to apply temporal prediction models to each district/beat and see the predictions and how the residuals are distributed spatially.
+
+```{r load-crimedata,echo=FALSE, cache=TRUE}
+setwd("/Users/xiaomuliu/CrimeProject/SpatioTemporalModeling/ExploratoryAnalysis/CrimeDataSTAnalysis/")
+source("importCrimeData.R")
+filePath <- "/Users/xiaomuliu/CrimeProject/SpatioTemporalModeling/ExploratoryAnalysis/CPD_DWH/"
+fileName <- "X_VIOLENTCRIME_POINTS_01_14.csv"
+CrimeData <- importCrimeData(filePath,fileName)
+```
+
+```{r aggregation,echo=FALSE, cache=TRUE}
+# aggregated by "beat"
+CrimeData.beat_day <- aggregate(INC_CNT~BEAT+DATEOCC+YEAR+MONTH+DOW,data=CrimeData, FUN=sum, na.rm=TRUE)
+CrimeData.beat_day <- CrimeData.beat_day[order(CrimeData.beat_day$DATEOCC),]
+CrimeData.beat_day$DOW <- factor(CrimeData.beat_day$DOW, levels=c("Sun","Mon","Tue","Wed","Thu","Fri","Sat"))
+# aggregated by "district"
+CrimeData.district_day <- aggregate(INC_CNT~DISTRICT+DATEOCC+YEAR+MONTH+DOW,data=CrimeData, FUN=sum, na.rm=TRUE)
+CrimeData.district_day <- CrimeData.district_day[order(CrimeData.district_day$DATEOCC),]
+CrimeData.district_day$DOW <- factor(CrimeData.district_day$DOW, levels=c("Sun","Mon","Tue","Wed","Thu","Fri","Sat"))
+```
+
+```{r SpTemplate,echo=FALSE, message=FALSE, warning=FALSE, cache=TRUE}
+##  Create Spatio-Temporal irregular layout data 
+library(rgdal)
+shapefilePath <- "/Users/xiaomuliu/CrimeProject/SpatioTemporalModeling/CPDShapeFiles/"
+beat.rg <- readOGR(shapefilePath, "beat_bndy")
+district.rg <- readOGR(shapefilePath, "district_bndy")
+# centroids 
+Crd.beat <- coordinates(beat.rg)
+Crd.district <- coordinates(district.rg)
+# create a spatial polygon data frame template
+library(sp)
+beat_template.spdf <- beat.rg
+beat_template.spdf@data$BEAT_NUMBE <- as.factor(as.integer(as.character(beat_template.spdf@data$BEAT_NUMBE)))
+beat_template.spdf@data$INC_CNT <- rep(NA,nrow(beat_template.spdf@data))
+
+district_template.spdf <- district.rg
+district_template.spdf@data$DISTRICT <- as.factor(as.integer(as.character(district_template.spdf@data$DISTRICT)))
+district_template.spdf@data$INC_CNT <- rep(NA,nrow(district_template.spdf@data))
+
+BeatList <- sort(unique(beat_template.spdf@data$BEAT_NUMBE))
+DistrictList <- sort(unique(district_template.spdf@data$DISTRICT))
+```
+
+Some of the explanatory variables are weather variables which are retrieved from WeatherAnalytics.com by its API. All the hourly weather data are further convert to daily ones and are trimed to contain only nine variables, namely, air temperature, dew point temperature, relative humidity, surface air pressure, cloud cover, apparent (aka feels-like) temperature, precipitation, wind speed. Their one-day and two-day differences are also calculated.
+
+```{r load-weatherdata,echo=FALSE, cache=TRUE}
+source("WeatherDataFunctions.R")
+WeatherFilePath <- "/Users/xiaomuliu/CrimeProject/SpatioTemporalModeling/ExploratoryAnalysis/WeatherData/"
+startDate="01/01/2008"
+endDate="12/31/2014"
+#RetrieveWeatherData(startDate, endDate, Path=WeatherFilePath)
+# filename.raw <- paste(WeatherFilePath,'WeatherData_',as.character(as.Date(startDate, "%m/%d/%Y")),'_',
+#                   as.character(as.Date(endDate, "%m/%d/%Y")),'.csv',sep='')
+# WeatherData.daily <- ConvertToDailyWeatherData(filename.raw)
+
+filename.daily <- paste(WeatherFilePath,'WeatherData_Daily_',as.character(as.Date(startDate, "%m/%d/%Y")),
+                        '_',as.character(as.Date(endDate, "%m/%d/%Y")),'.csv',sep='')
+#write.csv(WeatherData.daily, file = filename.daily,row.names=FALSE)
+WeatherData.daily <- read.csv(filename.daily)
+WeatherData.daily$Date <- as.Date(WeatherData.daily$Date)
+
+WeatherData.daily_diff <- DailyWeatherDiff(WeatherData.daily)
+```
+
+Here we show a few example of district-level crime count time series and their autocorreliations
+
+```{r district-examples, echo=FALSE, message=FALSE, warning=FALSE, fig.align='center',fig.width=8, fig.height=6, cache=TRUE}
+set.seed(1234)
+district_example <- sample(unique(CrimeData.district_day$DISTRICT),size=9)
+                           
+par(mfrow=c(3,3))                           
+for (i in district_example){ 
+  par(mar=c(4,4,3,1.5))
+  sub.df <- subset(CrimeData.district_day,DISTRICT==i,select=c("DATEOCC","INC_CNT"))
+  sub.df <- sub.df[order(sub.df$DATEOCC),]
+  plot(sub.df$DATEOCC, sub.df$INC_CNT,type="p",pch=16,cex=0.25,col="blue",
+       xlab="DATE",ylab="Crime Count",main=i)
+}
+
+for (i in district_example){
+  sub.df <- subset(CrimeData.district_day,DISTRICT==i,select=c("DATEOCC","INC_CNT"))
+  sub.df <- sub.df[order(sub.df$DATEOCC),]  
+  par(mar=c(4,4,3,1.5))
+  acf(na.omit(sub.df$INC_CNT), col="black", main = i,lwd=1.5)
+}
+```
+
+A few example of beat-level crime count time series and their autocorreliations
+
+```{r beat-examples, echo=FALSE, message=FALSE, warning=FALSE, fig.align='center',fig.width=8, fig.height=6, cache=TRUE}
+set.seed(1234)
+beat_example <- sample(unique(CrimeData.beat_day$BEAT),size=12)
+
+par(mfrow=c(4,3))
+for (i in beat_example){
+  par(mar=c(4,4,3,1.5))
+  sub.df <- subset(CrimeData.beat_day,BEAT==i,select=c("DATEOCC","INC_CNT"))
+  sub.df <- sub.df[order(sub.df$DATEOCC),]
+  plot(sub.df$DATEOCC, sub.df$INC_CNT,type="p",pch=16,cex=0.25,col="blue",
+       xlab="DATE",ylab="Crime Count",main=i)
+}
+
+for (i in beat_example){
+  sub.df <- subset(CrimeData.beat_day,BEAT==i,select=c("DATEOCC","INC_CNT"))
+  sub.df <- sub.df[order(sub.df$DATEOCC),]  
+  par(mar=c(4,4,3,1.5))
+  acf(na.omit(sub.df$INC_CNT), col="black", main = i,lwd=1.5)
+}
+```
+
+For each district/beat $i$, we apply the time series regression model which is simply in the form of
+$$
+y_i(t) = f_{Ti}(t) + f_{Ri}(X,t,y_i) + \epsilon_i(t)
+$$
+where 
+$$
+f_{Ti}(t) = \beta_0+\beta_1 t+\beta_2*sin(\frac{2\pi t}{365.25})+\beta_3*cos(\frac{2\pi t}{365.25})
+$$
+
+and $f_R$ models the residuals. And X contains weather, one and two day weather differences and order 1 and 2 lagged variables.
+
+$$
+f_{Ri}(X) = \mathbf{X}\beta 
+$$
+
+The variables were selected by the LASSO in which the optimal parameter $\lambda$ was chosen by cross validation.
+
+*For this part, we implemented a generic function which is able to let users adjust the following:*
+*1. The explanartory variables (including one or more of the following variable sets: weather, weather difference, day of week, month, and lagged variables);*
+*2. scaling methods (z-score, 0-1, and no standardization);*
+*3. The approach of fitting the seasonal trend (weighted least square (WLS) or iteratively reweighted lease square (IRLS));*
+*4. Response type of GLM (Gaussian or Poisson).*
+
+*Having done some experiments of the combination of the above options. It turned out that these do not affect the fitting accuarcy in terms of MSE very much. So here we only plot the results from using all available explanartory variables, 0-1 scaling since we have catogrical variables, fitting the trend by IRLS, and setting the response variable to be Gaussian.*
+
+```{r plot-district-regTS, echo=FALSE, message=FALSE, warning=FALSE, fig.align='center',fig.width=8, fig.height=6, eval=FALSE, cache=TRUE}
+source("TimeSeriesAnalysisFunction.R")
+ExampleSubset.district <- subset(CrimeData.district_day,DISTRICT %in% district_example)
+Eval.district <- TemporalRegression(area="DISTRICT",crimeData=ExampleSubset.district,weights=1,glm="gaussian",nlfit="IRLS",varSet=c("DOW","weather","weatherdiff","timelag"),standardize="minmax",plot=TRUE)
+# print(Eval.district)
+```
+
+```{r plot-beat-regTS, echo=FALSE, message=FALSE, warning=FALSE, fig.align='center',fig.width=8, fig.height=6, eval=FALSE, cache=TRUE}
+ExampleSubset.beat <- subset(CrimeData.beat_day,BEAT %in% beat_example)
+Eval.beat <- TemporalRegression(area="BEAT",crimeData=ExampleSubset.beat,weights=1,glm="gaussian",nlfit="IRLS",varSet=c("DOW","weather","weatherdiff","timelag"),standardize="minmax",plot=TRUE)
+# print(Eval.beat)
+```
+
+```{r district-regTS-spdf, echo=FALSE, message=FALSE, warning=FALSE, fig.align='center',fig.width=8, fig.height=6, cache=TRUE}
+source("STAnalysisFunction.R")
+STdata.district <- ConstructArealSTData(CrimeData.district_day,district_template.spdf,Crd.district,area="DISTRICT") 
+CrimeData_district_day.stfdf <-STdata.district$CrimeData.stfdf 
+CrimeData.district_day <- STdata.district$CrimeData 
+
+CrimeData_district_day.stfdf@data$Pred <- rep(NA,nrow(CrimeData_district_day.stfdf@data))
+CrimeData_district_day.stfdf@data$Resid <- rep(NA,nrow(CrimeData_district_day.stfdf@data))
+
+CrimeData.district_day$Pred <- rep(NA,nrow(CrimeData.district_day))
+CrimeData.district_day$Resid <- rep(NA,nrow(CrimeData.district_day))
+
+TRsp.district <- TemporalRegressionSTDF(area="DISTRICT",crimeData=CrimeData.district_day,glm="gaussian",nlfit="IRLS",
+                               varSet=c("DOW","weather","weatherdiff","timelag"),stData=CrimeData_district_day.stfdf,
+                               standardize="minmax")
+CrimeData_district_day.stfdf <- TRsp.district$stData
+CrimeData.district_day <- TRsp.district$CrimeData
+fitEval.district <- TRsp.district$fitEval
+```
+
+```{r beat-regTS-spdf, echo=FALSE, message=FALSE, warning=FALSE, fig.align='center',fig.width=8, fig.height=6, eval=TRUE, cache=TRUE}
+STdata.beat <- ConstructArealSTData(CrimeData.beat_day,beat_template.spdf,Crd.beat,area="BEAT") 
+CrimeData_beat_day.stfdf <-STdata.beat$CrimeData.stfdf 
+CrimeData.beat_day <- STdata.beat$CrimeData 
+
+CrimeData_beat_day.stfdf@data$Pred <- rep(NA,nrow(CrimeData_beat_day.stfdf@data))
+CrimeData_beat_day.stfdf@data$Resid <- rep(NA,nrow(CrimeData_beat_day.stfdf@data))
+
+CrimeData.beat_day$Pred <- rep(NA,nrow(CrimeData.beat_day))
+CrimeData.beat_day$Resid <- rep(NA,nrow(CrimeData.beat_day))
+
+TRsp.beat <- TemporalRegressionSTDF(area="BEAT",crimeData=CrimeData.beat_day,glm="gaussian",nlfit="IRLS",
+                      varSet=c("DOW","weather","weatherdiff","timelag"),stData=CrimeData_beat_day.stfdf,standardize="minmax")
+CrimeData_beat_day.stfdf <- TRsp.beat$stData
+CrimeData.beat_day <- TRsp.beat$CrimeData
+fitEval.beat <- TRsp.beat$fitEval
+```
+
+After doing district-level regression, we plot the actual and predicted time series and ACF of redsiduals:
+
+```{r ACF-district-regTS, echo=FALSE, message=FALSE, warning=FALSE, fig.align='center',fig.width=8, fig.height=6, cache=TRUE}
+par(mfrow=c(3,3)) 
+for (i in district_example){
+  par(mar=c(4,4,3,1.5))
+  sub.df <- subset(CrimeData.district_day,DISTRICT==i,select=c("DATEOCC","INC_CNT","Pred"))
+  sub.df <- sub.df[order(sub.df$DATEOCC),]
+  mse <- fitEval.district$MSE[fitEval.district$areaNo==i]
+  Rsq <- fitEval.district$Rsq[fitEval.district$areaNo==i]
+  plot(sub.df$DATEOCC, sub.df$INC_CNT,type="p",pch=16,cex=0.5,col="black",
+       xlab="DATE",ylab="Crime Count",main=paste(i,' (MSE=',mse,', r^2=', Rsq,')',sep=''))
+  points(sub.df$DATEOCC, sub.df$Pred,type="b",pch=16,cex=0.5,col="red")
+}
+
+for (i in district_example){
+  sub.df <- subset(CrimeData.district_day,DISTRICT==i,select=c("DATEOCC","Resid"))
+  sub.df <- sub.df[order(sub.df$DATEOCC),]  
+  par(mar=c(4,4,3,1.5))
+  acf(na.omit(sub.df$Resid), col="red", main = i,lwd=1.5)
+}
+```
+
+The actual and predicted time series and ACF of redsiduals for beat-level regression:
+
+```{r ACF-beat-res, echo=FALSE, message=FALSE, warning=FALSE, fig.align='center',fig.width=8, fig.height=6, eval=TRUE, cache=TRUE}
+par(mfrow=c(4,3)) 
+for (i in beat_example){
+  par(mar=c(4,4,3,1.5))
+  sub.df <- subset(CrimeData.beat_day,BEAT==i,select=c("DATEOCC","INC_CNT","Pred"))
+  sub.df <- sub.df[order(sub.df$DATEOCC),]
+  mse <- fitEval.beat$MSE[fitEval.beat$areaNo==i]
+  Rsq <- fitEval.beat$Rsq[fitEval.beat$areaNo==i]
+  plot(sub.df$DATEOCC, sub.df$INC_CNT,type="p",pch=16,cex=0.5,col="black",
+       xlab="DATE",ylab="Crime Count",main=paste(i,' (MSE=',mse,', r^2=', Rsq,')',sep=''))
+  points(sub.df$DATEOCC, sub.df$Pred,type="b",pch=16,cex=0.5,col="red")
+}
+
+for (i in beat_example){
+  sub.df <- subset(CrimeData.beat_day,BEAT==i,select=c("DATEOCC","Resid"))
+  sub.df <- sub.df[order(sub.df$DATEOCC),]  
+  par(mar=c(4,4,3,1.5))
+  acf(na.omit(sub.df$Resid), col="red", main = i,lwd=1.5)
+}
+```
+
+We pick up two dates (2014-08-01 and 2014-08-02) and do the spatially mapping: (1) the actual count (overlayed by the acutal crime incident locations) (2) the predicted count and (3) the prediction error, at district level.
+
+```{r SpMapping-district-res, echo=FALSE, message=FALSE, warning=FALSE, fig.align='center',fig.width=10, fig.height=6, cache=TRUE}
+library(lattice)
+selectedDay <- "2014-08-01::2014-08-02"
+Res.sample <- as.data.frame(CrimeData_district_day.stfdf[,selectedDay])
+Res.sample$DISTRICT <- factor(Res.sample$DISTRICT,levels=levels(Res.sample$sp.ID))
+Res.sample$endTime <- NULL
+Res.sample$sp.ID <- NULL
+Res.sample$DATEOCC <- NULL
+Res.sample$timeIndex <- NULL
+names(Res.sample)[names(Res.sample)=="time"] <- "DATEOCC"
+names(Res.sample)[names(Res.sample)=="sp.ID"] <- "DISTRICT"
+
+
+districtPred_template.spdf <- district_template.spdf
+districtPred_template.spdf@data$Pred <- rep(NA,nrow(districtPred_template.spdf@data))
+districtPred_template.spdf@data$Resid <- rep(NA,nrow(districtPred_template.spdf@data))
+for (i in unique(Res.sample$DATEOCC)) {
+  districtPred.spdf <- districtPred_template.spdf
+  for (j in DistrictList){
+    Res.sample_sub= subset(Res.sample,DATEOCC==as.Date(i)&DISTRICT==j)
+    
+    districtPred.spdf@data$INC_CNT[districtPred.spdf@data$DISTRICT==j] = Res.sample_sub$INC_CNT
+    districtPred.spdf@data$Pred[districtPred.spdf@data$DISTRICT==j] = Res.sample_sub$Pred
+    districtPred.spdf@data$Resid[districtPred.spdf@data$DISTRICT==j] = Res.sample_sub$Resid
+  }
+  
+  CrimePts <- subset(CrimeData,DATEOCC==as.Date(i),select = c("X_COORD","Y_COORD","INC_CNT"))
+  CrimePts.sp <- SpatialPoints(coords=CrimePts[,c("X_COORD","Y_COORD")])
+  # superimpose actual point locations
+  spPts <- list("sp.points", CrimePts.sp, pch=16, col="red", cex=0.4, first=FALSE) 
+  f1 <- spplot(districtPred.spdf, zcol="INC_CNT", col.regions=topo.colors(256),colorkey=list(width=0.5),
+               main=list("Actual district level crime count",cex=0.75),sp.layout = spPts)
+  f2 <- spplot(districtPred.spdf, zcol="Pred", col.regions=topo.colors(256),colorkey=list(width=0.5),
+               main=list("Predicted district level crime count",cex=0.75))
+  f3 <- spplot(districtPred.spdf, zcol="Resid", col.regions=topo.colors(256),colorkey=list(width=0.5),
+               main=list("Residual",cex=0.75))
+  print(f1, position=c(0, 0, 1/3, 1), more=TRUE)
+  print(f2, position=c(1/3, 0, 2/3, 1), more=TRUE)
+  print(f3, position=c(2/3, 0, 1, 1))
+}
+```
+
+Spatial mapping of: (1) the actual count (overlayed by the acutal crime incident locations) (2) the predicted count and (3) the prediction error, at beat level.
+
+```{r SpMapping-beat-res, echo=FALSE, message=FALSE, warning=FALSE, fig.align='center',fig.width=10, fig.height=6, eval=TRUE, cache=TRUE}
+Res.sample <- as.data.frame(CrimeData_beat_day.stfdf[,selectedDay])
+Res.sample$BEAT <- factor(Res.sample$BEAT,levels=levels(Res.sample$sp.ID))
+Res.sample$endTime <- NULL
+Res.sample$sp.ID <- NULL
+Res.sample$DATEOCC <- NULL
+Res.sample$timeIndex <- NULL
+names(Res.sample)[names(Res.sample)=="time"] <- "DATEOCC"
+names(Res.sample)[names(Res.sample)=="sp.ID"] <- "BEAT"
+
+# polygon object has 288 polygons: nrow(object@data) != length(object@sp) * nrow(object@time)
+# beatPolygon <- as(beat_template.spdf,"SpatialPolygons")
+# beatPred.stfdf <- STFDF(beatPolygon, unique(Res.sample$DATEOCC), data=Res.sample[,c("INC_CNT","Pred","Resid")])
+# f<-spplot(beatPred.stfdf)
+
+# NEED FURTHER WORK: the actual crime points do NOT match with the beat level count for beats. Possible reasons:
+# 1. some shape file polygons are not shown (low resolution ?).
+# 2. beat polygons are not consistent with the CPD's file (shape files are outdated?)
+# NOTE: the spatial point/polygon data frame beatPred.spdf has correct data. Only display has something wrong
+
+beatPred_template.spdf <- beat_template.spdf
+beatPred_template.spdf@data$Pred <- rep(NA,nrow(beatPred_template.spdf@data))
+beatPred_template.spdf@data$Resid <- rep(NA,nrow(beatPred_template.spdf@data))
+for (i in unique(Res.sample$DATEOCC)) {
+  beatPred.spdf <- beatPred_template.spdf
+  for (j in BeatList){
+    Res.sample_sub= subset(Res.sample,DATEOCC==as.Date(i)&BEAT==j)
+    
+    beatPred.spdf@data$INC_CNT[beatPred.spdf@data$BEAT_NUMBE==j] = Res.sample_sub$INC_CNT
+    beatPred.spdf@data$Pred[beatPred.spdf@data$BEAT_NUMBE==j] = Res.sample_sub$Pred
+    beatPred.spdf@data$Resid[beatPred.spdf@data$BEAT_NUMBE==j] = Res.sample_sub$Resid
+  }
+  
+  CrimePts <- subset(CrimeData,DATEOCC==as.Date(i),select = c("X_COORD","Y_COORD","INC_CNT"))
+  CrimePts.sp <- SpatialPoints(coords=CrimePts[,c("X_COORD","Y_COORD")])
+  # superimpose actual point locations
+  spPts <- list("sp.points", CrimePts.sp, pch=16, col="red", cex=0.4, first=FALSE) 
+  f1 <- spplot(beatPred.spdf, zcol="INC_CNT", col.regions=topo.colors(256),colorkey=list(width=0.5),
+             main=list("Actual beat level crime count",cex=0.75),sp.layout = spPts)
+  f2 <- spplot(beatPred.spdf, zcol="Pred", col.regions=topo.colors(256),colorkey=list(width=0.5),
+             main=list("Predicted beat level crime count",cex=0.75))
+  f3 <- spplot(beatPred.spdf, zcol="Resid", col.regions=topo.colors(256),colorkey=list(width=0.5),
+             main=list("Residual",cex=0.75))
+  print(f1, position=c(0, 0, 1/3, 1), more=TRUE)
+  print(f2, position=c(1/3, 0, 2/3, 1), more=TRUE)
+  print(f3, position=c(2/3, 0, 1, 1))
+}
+```

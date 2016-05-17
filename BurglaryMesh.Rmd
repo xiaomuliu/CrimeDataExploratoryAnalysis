@@ -1,0 +1,166 @@
+---
+title: "Burglary Mesh"
+date: "July 10, 2015"
+output: html_document
+---
+
+```{r load-data,echo=FALSE, cache=TRUE}
+setwd("/Users/xiaomuliu/CrimeProject/SpatioTemporalModeling/ExploratoryAnalysis/BurglaryAnalysis/")
+source("importCrimeData.R")
+filePath <- "/Users/xiaomuliu/CrimeProject/SpatioTemporalModeling/ExploratoryAnalysis/CPD_DWH/"
+fileName <- "X_BURGLARY_POINTS_08_14.csv"
+BurglaryData <- importCrimeData(filePath,fileName)
+row.names(BurglaryData) <- NULL
+```
+
+When creating the pixel image, we define a box with constraints of x coordinate from 1091131 to 1205199 and y coordinate from 1813892 to 1951669. (Layer: State Plane Illinois East; Unit: US foot)
+```{r citybndy-plot,echo=FALSE,message=FALSE, warning=FALSE, fig.showtext=FALSE, fig.align='center', cache=TRUE}
+library(rgdal)
+citybdPath <- "/Users/xiaomuliu/CrimeProject/SpatioTemporalModeling/CPDShapeFiles/new/City_Boundary"
+city.rg <- readOGR(citybdPath,"City_Boundary")
+plot(city.rg, border="black",main="City Boundary")
+box(which = "plot", lty = "solid")
+citybox <- city.rg@bbox
+X_range <- citybox[1,]
+Y_range <- citybox[2,]
+```
+
+```{r subset-data,echo=FALSE, cache=TRUE}
+year1 <- 2014
+year2 <- 2013
+BurglaryData.sub <- subset(BurglaryData,YEAR==year1|YEAR==year2,select=c("DATEOCC","X_COORD","Y_COORD","INC_CNT"))
+```
+
+We pixelized burgarly point data to an image of 200 by 200. The following example shows the burglary incident data pulled over year 2013 and 2014.
+
+```{r raster, echo=FALSE, message=FALSE, warning=FALSE, fig.align='center',cache=TRUE}
+nx <- 200
+ny <- 200
+
+jet.colors <- colorRampPalette(c("#00007F", "blue", "#007FFF", "cyan", "#7FFF7F", "yellow", "#FF7F00", "red", "#7F0000"))
+# add.alpha <- function(COLORS, ALPHA){
+#   if(missing(ALPHA)) stop("provide a value for alpha between 0 and 1")
+#   RGB <- col2rgb(COLORS, alpha=TRUE)
+#   RGB[4,] <- round(RGB[4,]*ALPHA)
+#   NEW.COLORS <- rgb(RGB[1,], RGB[2,], RGB[3,], RGB[4,], maxColorValue = 255)
+#   return(NEW.COLORS)
+# }
+# alphaCol <- add.alpha(jet.colors(256), 0.6)
+
+library(sp)
+library(raster)
+r <- raster(ncol=nx,nrow=ny,xmn=X_range[1],xmx=X_range[2],ymn=Y_range[1],ymx=Y_range[2])
+BurglaryData.subRaster <- rasterize(BurglaryData.sub[,c("X_COORD","Y_COORD")], r, 
+                                   BurglaryData.sub$INC_CNT, fun=sum)
+plot(BurglaryData.subRaster, panel.first=grid(nx,ny,col = "lightgray", lty = "dotted"), col=jet.colors(256))
+```
+
+Next step is KDE. The kernel applied here is a 2D Gaussian kernel with the same bandwidth in each direction. The bandwidth was selected through (minimizing MSE) cross-valiation which yield an optimal bandwidth of 459 spatial unit (1 pixel cell).
+
+```{r KernelSmooth, echo=FALSE, message=FALSE, warning=FALSE, fig.width=5,fig.height=5, fig.align='center', cache=TRUE}
+library(spatstat)
+rasterMat <- matrix(BurglaryData.subRaster@data@values,nx,ny)
+rasterMat[is.na(rasterMat)] = 0 
+grd <- expand.grid(list(X_COORD = seq(X_range[1], X_range[2], length.out=nx), 
+                        Y_COORD = seq(Y_range[1], Y_range[2], length.out=ny)))
+BurglaryData.pp <- ppp(grd$X_COORD,grd$Y_COORD,window=owin(xrange=X_range,yrange=Y_range),marks=as.vector(rasterMat))
+h <- bw.diggle(BurglaryData.pp)
+# plot(h,ylab="MSE",main=list("Find the opitmal kernel bandwidth via minimizing-MSE CV",cex=0.8))
+h <- round(as.numeric(h))
+
+library(KernSmooth)
+KDE.df <- data.frame(X_COORD=grd$X_COORD,Y_COORD=grd$Y_COORD,VALUE=rep(NA,nx*ny))
+
+kernSm <- bkde2D(data.matrix(BurglaryData.sub[,c("X_COORD","Y_COORD")]), bandwidth=c(h,h), 
+                 gridsize=c(nx, ny), range.x=list(X_range,Y_range))
+  
+KDE.df$VALUE <- as.vector(kernSm$fhat)     
+
+# scale KDE values to [0,1]
+KDE.df$val_scale <- rep(NA,nrow(KDE.df))
+KDE.df$val_scale <- KDE.df$VALUE-min(KDE.df$VALUE)
+KDE.df$val_scale <- KDE.df$val_scale/max(KDE.df$VALUE)
+```
+
+We'd like to have 300 mesh nodes which is approximately equal to the number of police beat. According to the relation $q \approx \frac{1}{N_n}\sum_{i=1}^{M}\sum_{j=1}^{N}\sigma(i,j)$, we can calculate the threshold before the Floyd-Steinberg error diffusion algorithm's computation.
+
+```{r mesh-node, message=FALSE, warning=FALSE, echo=FALSE, cache=TRUE}
+M <- ny
+N <- nx
+# Ratio <- 100
+# ENode <- M*N/Ratio
+ENode <- 300
+
+meshgrd <- expand.grid(x=seq(X_range[1],X_range[2],length.out=N), y=seq(Y_range[1],Y_range[2],length.out=M))
+
+threshold <- sum(KDE.df$val_scale)/(2*ENode)
+
+pixelIm <- matrix(KDE.df$val_scale,M,N) 
+
+source("Dither.R")
+
+b = errorDiffusion(pixelIm, 1, threshold)
+
+Reg_x <- matrix(meshgrd$x,M,N)
+Reg_y <- matrix(meshgrd$y,M,N)
+
+temp <- t(Reg_x)
+Node_x <- temp[t(b)==1]
+temp <- t(Reg_y)
+Node_y <- temp[t(b)==1]
+
+Node_x[Node_x>X_range[2]] <- X_range[2]
+Node_y[Node_y>Y_range[2]] <- Y_range[2]
+Node_x[max(Node_x)==Node_x] <- X_range[2]
+Node_y[max(Node_y)==Node_y] <- Y_range[2]
+```
+
+Once the mesh node locations were known, they were connected via 2D Delaunay triangulation.
+
+```{r delaunayTri, message=FALSE, warning=FALSE, echo=FALSE, cache=TRUE}
+library(geometry)
+tri1 <- delaunayn(cbind(Node_x,Node_y))
+pts <- cbind(Node_x,Node_y)
+meshVertices <- rbind(tri1[, -1], tri1[, -2], tri1[, -3])
+```
+
+The Delaunay triangulation method is defined for a convex hull. However, the map of Chicago has both convex and concave boundaries. Now, we are running into a technical difficulty of how to remove meshes out of the city boundary. The city boundary shape file has holes (contours) which means constriained Delaunay triangulation algorithm cannot be used. Constriained Delaunay triangulation algorithm requires polygon vertices presented in a certain order.
+
+```{r mesh-nobndy-convex-overlay, echo=FALSE, message=FALSE, warning=FALSE, fig.align='center', fig.width=5, fig.height=6, cache=TRUE}
+par(mfrow=c(1,1),oma=c(0,0,1,0))
+image(x=seq(X_range[1],X_range[2],length.out=N),y=seq(Y_range[1],Y_range[2],length.out=M),
+      z=pixelIm,col=jet.colors(256),xlab="X coordinate",ylab="Y coordinate")
+trimesh(tri1,pts,add=TRUE,axis=FALSE,boxed=TRUE,col="red")
+title(paste0("Burglary Density (",year1,"-",year2,") and Superimposed Mesh"), outer=TRUE, cex.main=0.75)
+```
+
+```{r mesh-nobndy-convex-seperate, echo=FALSE, message=FALSE, warning=FALSE, fig.width=10, fig.height=6.5, cache=TRUE,eval=FALSE}
+par(mfrow=c(1,2),oma=c(0,0,2,0))
+image(x=seq(X_range[1],X_range[2],length.out=N),y=seq(Y_range[1],Y_range[2],length.out=M),
+      z=pixelIm,col=jet.colors(256),xlab="X coordinate",ylab="Y coordinate")
+plot.new()
+plot.window(xlim=c(X_range[1],X_range[2]),ylim=c(Y_range[1],Y_range[2]))
+axis(1)
+axis(2)
+box()
+segments(pts[meshVertices[, 1], 1], pts[meshVertices[, 1], 2], pts[meshVertices[, 2], 1], pts[meshVertices[, 2], 2], col="blue")
+title(paste0("Burglary Density (",year1,"-",year2,") and Mesh"), outer=TRUE, cex.main=1)
+```
+
+Burglary density and its corresponding mesh of every non-overlapping two years
+
+```{r two-year-mesh, echo=FALSE, message=FALSE, warning=FALSE, fig.width=10, fig.height=6.5, cache=TRUE}
+pixRes <- c(200,200)
+ENode <- 300
+spaceRange <- data.frame(x=c(0,0),y=c(0,0))
+spaceRange$x <- citybox[1,]
+spaceRange$y <- citybox[2,]
+
+source("GenerateMesh.R")
+timeRange1 <- c(2008,2009) 
+timeRange2 <- c(2010,2011) 
+timeRange3 <- c(2012,2013)
+meshList1 <- generateMesh(BurglaryData,timeRange1,spaceRange,pixRes,ENode,plot=TRUE)
+meshList2 <- generateMesh(BurglaryData,timeRange2,spaceRange,pixRes,ENode,plot=TRUE)
+meshList3 <- generateMesh(BurglaryData,timeRange3,spaceRange,pixRes,ENode,plot=TRUE)
+```

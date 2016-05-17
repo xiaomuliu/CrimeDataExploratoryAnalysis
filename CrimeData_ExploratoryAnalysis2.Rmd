@@ -1,0 +1,279 @@
+---
+title: "Violent Crime Areal Analysis"
+date: "April 17, 2015"
+output: html_document
+---
+
+This part studies the relationship between different beats/district. Most of the analyses are in reference with spatial economics which extends the use of 1D statistical tools and some statistics to spatial studies. 
+
+```{r load-data,echo=FALSE, cache=TRUE}
+setwd("/Users/xiaomuliu/CrimeProject/SpatioTemporalModeling/ExploratoryAnalysis/CrimeDataSTAnalysis/")
+source("importCrimeData.R")
+filePath <- "/Users/xiaomuliu/CrimeProject/SpatioTemporalModeling/ExploratoryAnalysis/CPD_DWH/"
+fileName <- "X_VIOLENTCRIME_POINTS_01_14.csv"
+CrimeData <- importCrimeData(filePath,fileName)
+```
+
+The areal analysis begins with creating the block-wise connectivity matrices. Note the key difference with the later Kriging study is that the elements of connectivity matrices are simply 1 or 0, that is two areas are connected or not, while in Kriging, the covariance matrices are dependent of the distances between two locations.
+
+```{r conn-mat, echo=FALSE, message=FALSE, warning=FALSE, fig.align='center',fig.width=10,fig.height=7.5, cache=TRUE}
+library(rgdal)
+shapefilePath <- "/Users/xiaomuliu/CrimeProject/SpatioTemporalModeling/CPDShapeFiles/"
+district.rg <- readOGR(shapefilePath, "district_bndy")
+beat.rg <- readOGR(shapefilePath, "beat_bndy")
+
+# get centroids
+Crd.district <- coordinates(district.rg)
+Crd.beat <- coordinates(beat.rg)
+
+library(spdep)
+# Contiguity Neighbors
+W_conn.district <- poly2nb(district.rg, queen=T)
+W_conn_mat.district <- nb2listw(W_conn.district, style="W", zero.policy=TRUE)
+W_conn.beat <- poly2nb(beat.rg, queen=T)
+W_conn_mat.beat <- nb2listw(W_conn.beat, style="W", zero.policy=TRUE)
+
+# Plot the connections
+layout(matrix(1:2,nrow=1,ncol=2))
+plot(district.rg, border="black",main=list("District Centroid Connection",cex=0.75))
+plot(W_conn_mat.district,coords=Crd.district, pch=19, cex=0.5, col="blue", add=TRUE)
+plot(beat.rg, border="black",main=list("Beat Centroid Connection",cex=0.75))
+plot(W_conn_mat.beat,coords=Crd.beat, pch=19, cex=0.5, col="blue", add=TRUE)
+
+```
+
+Regional total amount of violent crimes (2008-2014)
+
+```{r vis-count,echo=FALSE, message=FALSE, warning=FALSE, fig.align='center',fig.width=7.5,fig.height=5, cache=TRUE}
+# aggregated by "beat"/"district"
+CrimeData.beat_day <- aggregate(INC_CNT~BEAT+DATEOCC+YEAR+MONTH+DOW,data=CrimeData, FUN=sum, na.rm=TRUE)
+CrimeData.district_day <- aggregate(INC_CNT~DISTRICT+DATEOCC+YEAR+MONTH+DOW,data=CrimeData, FUN=sum, na.rm=TRUE)
+CrimeData.beat_all <- aggregate(INC_CNT~BEAT,data=CrimeData, FUN=sum, na.rm=TRUE)
+CrimeData.district_all <- aggregate(INC_CNT~DISTRICT,data=CrimeData, FUN=sum, na.rm=TRUE)
+
+# visualize by beat/district blocks
+district.spdf <- district.rg
+district.spdf@data$DISTRICT <- as.factor(as.integer(as.character(district.spdf@data$DISTRICT)))
+district.spdf@data$INC_CNT <- rep(NA,dim(district.spdf@data)[1])
+for (i in unique(CrimeData.district_all$DISTRICT)){
+  district.spdf@data$INC_CNT[district.spdf@data$DISTRICT==i] = 
+    CrimeData.district_all$INC_CNT[CrimeData.district_all$DISTRICT==i]
+}
+f1<-spplot(district.spdf, zcol="INC_CNT", col.regions=topo.colors(256), colorkey=list(width=0.5),
+           main=list("Total violent crime counts by district (2008-2014)",cex=0.75))
+
+# NOTE: there are a few mismatches between beat number in shape files and those in crime data
+beat.spdf <- beat.rg
+beat.spdf@data$BEAT_NUMBE<- as.factor(as.integer(as.character(beat.spdf@data$BEAT_NUMBE)))
+beat.spdf@data$INC_CNT <- rep(NA,dim(beat.spdf@data)[1])
+for (i in unique(CrimeData.beat_all$BEAT)){
+  beat.spdf@data$INC_CNT[beat.spdf@data$BEAT_NUMBE==i] = 
+    CrimeData.beat_all$INC_CNT[CrimeData.beat_all$BEAT==i]
+}
+f2<-spplot(beat.spdf, zcol="INC_CNT", col.regions=topo.colors(256),colorkey=list(width=0.5),
+           main=list("Total violent crime counts by beat (2008-2014)",cex=0.75))
+
+print(f1, position=c(0, 0, 0.5, 1), more=TRUE)
+print(f2, position=c(0.5, 0, 1, 1))
+```
+
+Note: the district shape file has 28 district polygons and 26 distinct district numbers, while the data has 26 unique district numbers. Because the side effect of plotting polygons creates two "byproduct" districts. The district numbers in these two files match though. However, the beat shape file has 288 polygons and 286 unique beat numbers, while the dataset has 305 unique beat numbers.
+Mismatching beats (the ones are not shown in the shape file but exist in the crime data): 
+
+```{r mismatch, echo=FALSE, message=FALSE, warning=FALSE, cache=TRUE}
+bNo1 <- as.numeric(sort(as.character(unique(beat.rg@data$BEAT_NUMBE))))
+bNo2 <- as.numeric(as.character(unique(CrimeData.beat_all$BEAT)))
+miss <- numeric()
+for (i in bNo2){
+  if (length(which(bNo1==i)) == 0){
+    miss <- c(miss,i)
+  }
+}
+print(miss)
+```
+
+Pooled spatial autocorrelation: Moran's I test.
+
+The Moran's I coeffcient calculates the ratio between the product of the variable of interest and its spatial lag, with the product of the variable of interest, adjusted for the spatial weights used.
+$$
+I_i = \frac{n}{\sum_{i=1}^{n}\sum_{j=1}^{n}W_{ij}}\frac{\sum_{i=1}^{n}\sum_{j=1}^{n}W_{ij}(y_i-\bar{y})(y_j-\bar{y})}{\sum_{i}^{n}(y_i-\bar{y})}
+$$
+This statistic ranges from -1 to +1. A zero value indicates a random spatial pattern. Under the null hypothesis of no autocorrelation, $$E[I]=-\frac{1}{n-1}$$
+
+Not surprisingly, the city-wide spatial correlation is strong.
+```{r moran-pooled,echo=FALSE, message=FALSE, warning=FALSE, cache=TRUE}
+# Global Autocorrelation Tests: Moran's I
+moran.test(district.spdf$INC_CNT, listw=W_conn_mat.district, zero.policy=T)
+moran.test(beat.spdf$INC_CNT, listw=W_conn_mat.beat, zero.policy=T)
+```
+
+Moran scatterplot: a plot of spatial data against its spatially lagged values. Marked points (with the district/beat numbsers) are the ones with high influence measures for the linear relationship.
+
+```{r moran-plot,echo=FALSE, message=FALSE, warning=FALSE, fig.align='center',fig.width=7.5,fig.height=5, cache=TRUE}
+# Moran Scatterplot
+par(mfrow=c(1,2))
+par(mar=c(4,4,1.5,0.5))
+moran.plot(district.spdf$INC_CNT, listw=W_conn_mat.district, zero.policy=T, 
+           pch=16, col="blue",cex=.75, quiet=T, labels=as.character(district.spdf@data$DISTRICT),
+           xlab="Violent Crime Count", ylab="Violent Crime Count (Spatial Lag)", 
+           main=list("Moran Scatterplot (District)",cex=0.75))
+par(mar=c(4,4,1.5,0.5))
+moran.plot(beat.spdf$INC_CNT, listw=W_conn_mat.beat, zero.policy=T, 
+           pch=16, col="blue",cex=.75, quiet=T, labels=as.character(beat.spdf@data$BEAT_NUM),
+           xlab="Violent Crime Count", ylab="Violent Crime Count (Spatial Lag)", 
+           main=list("Moran Scatterplot (Beat)",cex=0.75))
+```
+
+Global tests for spatial autocorrelation are calculated from local relationships between observed values at spatial units and their neighbors. It is possible to break these measures down into their components. A local Moran's I coeffcient for unit i can be constructed as one of the n components which comprise the global test:
+$$
+I_i= \frac{n(y_i-\bar{y})\sum_{j=1}^{n}W_{ij}(y_j-\bar{y})}{\sum_{i}^{n}(y_i-\bar{y})}
+$$
+
+The map below displays each region's contribution to the global Moran's I.
+
+```{r loc-moran-pooled,echo=FALSE, message=FALSE, warning=FALSE, fig.align='center',fig.width=7.5,fig.height=5, cache=TRUE}
+# Local Autocorrelation: Local Moran's I (normality assumption)
+locMoran.district <- localmoran(district.spdf$INC_CNT, listw=W_conn_mat.district, zero.policy=T)
+district.spdf$locMoranZ <- locMoran.district[,"Z.Ii"] ## Extract z-scores
+locMoran.beat <- localmoran(beat.spdf$INC_CNT, listw=W_conn_mat.beat, zero.policy=T)
+beat.spdf$locMoranZ <- locMoran.beat[,"Z.Ii"] ## Extract z-scores
+
+lm.palette <- colorRampPalette(c("blue","green","red"), space = "rgb")
+f1<-spplot(district.spdf, zcol="locMoranZ", col.regions=lm.palette(64),colorkey=list(width=0.5),
+           main=list("District-level Local Moran's I (Z-score)",cex=0.75), pretty=T)
+f2<-spplot(beat.spdf, zcol="locMoranZ", col.regions=lm.palette(64),colorkey=list(width=0.5),
+           main=list("Beat-level Local Moran's I (Z-score)",cex=0.75), pretty=T)
+print(f1, position=c(0, 0, 0.5, 1), more=TRUE)
+print(f2, position=c(0.5, 0, 1, 1))
+```
+
+The district-level aggregation seems to be too coarse. The following analysis will be focused on the beat only.
+
+Now let's see if (global) Moran's I statistics have any temporal patterns. The plot below shows that hot months have a little stronger spatial autocorrelation that cold months. Also there is no obvious climbing-up or climbing-down long-term trend.
+
+```{r monthly-moran-TS, echo=FALSE, message=FALSE, warning=FALSE, fig.align='center',cache=TRUE}
+# loop over each month
+CrimeData.beat_month <- aggregate(INC_CNT~BEAT+YEAR+MONTH,data=CrimeData.beat_day, FUN=sum, na.rm=TRUE)
+
+# create a spatial polygon data frame template
+beat_template.spdf <- beat.rg
+beat_template.spdf@data$BEAT_NUMBE<- as.factor(as.integer(as.character(beat_template.spdf@data$BEAT_NUMBE)))
+beat_template.spdf@data$INC_CNT <- rep(NA,dim(beat_template.spdf@data)[1])
+
+mt.m <- data.frame(YEAR=integer(),MONTH=integer(),MoranI=numeric(),Pval=numeric())
+for (i in unique(CrimeData$YEAR)){
+  for (j in 1:12){
+    beat_m.spdf <- beat_template.spdf
+    for (k in unique(CrimeData.beat_month$BEAT)){ 
+      idx <- which(CrimeData.beat_month$YEAR==i & CrimeData.beat_month$MONTH==j & CrimeData.beat_month$BEAT==k)
+      # if can't find matched entries
+      if (length(idx)==0){
+        beat_m.spdf@data$INC_CNT[beat_m.spdf@data$BEAT_NUMBE==k] = 0
+      }
+      else{
+        beat_m.spdf@data$INC_CNT[beat_m.spdf@data$BEAT_NUMBE==k] = 
+          CrimeData.beat_month$INC_CNT[idx]
+      }  
+    }
+    stat <- moran.test(beat_m.spdf$INC_CNT, listw=W_conn_mat.beat, zero.policy=T)
+    mt.m <- rbind(mt.m,data.frame("YEAR"=i,"MONTH"=j,
+                              "MoranI"=as.numeric(stat$estimate["Moran I statistic"]),"Pval"=stat$p.value))
+  }
+}
+mt.m <- transform(mt.m, Date = as.Date(paste(YEAR, MONTH, 1, sep = "-"),format="%Y-%m-%d"))
+
+library(xts)
+moranTS.m <- xts(mt.m,order.by=mt.m$Date)
+plot(moranTS.m$MoranI,major.ticks="months",minor.ticks=FALSE,col="blue",type="b",pch=16,cex=1,
+     xlab="",ylab=list("Global Moran's I",cex=1), main=list("Monthly Moran's I",cex=1))
+```
+
+The daily (global) Moran's I statistics time series plot unveils this pattern more clearly.
+
+```{r daily-moran-TS, eval=FALSE, echo=FALSE, message=FALSE, warning=FALSE, fig.align='center',cache=TRUE}
+## loop over each day (this takes very long time to run)
+
+# create a spatial polygon data frame template
+beat_template.spdf <- beat.rg
+beat_template.spdf@data$BEAT_NUMBE<- as.factor(as.integer(as.character(beat_template.spdf@data$BEAT_NUMBE)))
+beat_template.spdf@data$INC_CNT <- rep(NA,dim(beat_template.spdf@data)[1])
+
+mt.d <- data.frame(DATEOCC=numeric(),MoranI=numeric(),Pval=numeric())
+for (i in unique(CrimeData.beat_day$DATEOCC)){
+    beat_d.spdf <- beat_template.spdf
+    for (k in unique(CrimeData.beat_day$BEAT)){ 
+      idx <- which(CrimeData.beat_day$DATEOCC==i & CrimeData.beat_day$BEAT==k)
+      # if can't find matched entries
+      if (length(idx)==0){
+        beat_d.spdf@data$INC_CNT[beat_d.spdf@data$BEAT_NUMBE==k] = 0
+      }
+      else{
+        beat_d.spdf@data$INC_CNT[beat_d.spdf@data$BEAT_NUMBE==k] = 
+          CrimeData.beat_day$INC_CNT[idx]
+      }  
+    }
+    stat <- moran.test(beat_d.spdf$INC_CNT, listw=W_conn_mat.beat, zero.policy=T)
+    mt.d <- rbind(mt.d,data.frame("DATEOCC"=i,
+                              "MoranI"=as.numeric(stat$estimate["Moran I statistic"]),"Pval"=stat$p.value))
+}
+
+mt.d$DATEOCC<-unique(CrimeData.beat_day$DATEOCC)
+save(mt.d, file = "DailyMoran.RData")
+
+library(xts)
+moranTS.d <- xts(mt.d,order.by=mt.d$DATEOCC)
+plot(moranTS.d$MoranI,major.ticks="months",minor.ticks=FALSE,col="blue",
+     xlab="",ylab=list("Global Moran's I",cex=1), main=list("Daily Moran's I",cex=1))
+```
+
+```{r daily-moran-TS2, echo=FALSE, message=FALSE, warning=FALSE, fig.align='center',cache=TRUE}
+# Run this chunk instead with pre-calculated daily Moran's I to display the series
+load("DailyMoran.RData")
+
+library(xts)
+moranTS.d <- xts(mt.d,order.by=mt.d$DATEOCC)
+plot(moranTS.d$MoranI,major.ticks="months",minor.ticks=FALSE,col="blue",
+     xlab="",ylab=list("Global Moran's I",cex=1), main=list("Daily Moran's I",cex=1))
+```
+
+The following animation is aimed to explore if there exists migration regarding the each beat's local Moran's I. (It'd be less confusing if we were able to the same color scale for each frame. But we have not found a way to do that.)
+
+```{r LocMoran-animation, echo=FALSE, message=FALSE, warning=FALSE, cache=TRUE}
+CrimeData.beat_month <- aggregate(INC_CNT~BEAT+YEAR+MONTH,data=CrimeData.beat_day, FUN=sum, na.rm=TRUE)
+
+# create a spatial polygon data frame template
+beat_template.spdf <- beat.rg
+beat_template.spdf@data$BEAT_NUMBE<- as.factor(as.integer(as.character(beat_template.spdf@data$BEAT_NUMBE)))
+beat_template.spdf@data$INC_CNT <- rep(NA,dim(beat_template.spdf@data)[1])
+
+lm.palette <- colorRampPalette(c("blue","green","red"), space = "rgb")
+figPath = "/Users/xiaomuliu/CrimeProject/SpatioTemporalModeling/ExploratoryAnalysis/CrimeDataSTAnalysis/"
+
+library(animation)
+flag<-saveGIF({# KDE looping over month and year
+  for (i in unique(CrimeData$YEAR)){
+    beat_y.spdf <- beat_template.spdf
+    for (j in 1:12){
+      beat_m.spdf <- beat_template.spdf
+      for (k in unique(CrimeData.beat_month$BEAT)){ 
+        idx <- which(CrimeData.beat_month$YEAR==i & CrimeData.beat_month$MONTH==j & CrimeData.beat_month$BEAT==k)
+        # if can't find matched entries
+        if (length(idx)==0){
+          beat_m.spdf@data$INC_CNT[beat_m.spdf@data$BEAT_NUMBE==k] = 0
+        }
+        else{
+          beat_m.spdf@data$INC_CNT[beat_m.spdf@data$BEAT_NUMBE==k] = 
+            CrimeData.beat_month$INC_CNT[idx]
+        }  
+      }
+      locMoran.beat <- localmoran(beat_m.spdf@data$INC_CNT, listw=W_conn_mat.beat, zero.policy=T)
+      beat_y.spdf@data[paste("LocMoranZ",as.character(j),sep="")] <- locMoran.beat[,"Z.Ii"]
+    }
+    f<-spplot(beat_y.spdf, zcol=names(beat_y.spdf@data)[grep("^LocMoranZ[1-9]+",names(beat_y.spdf@data))],
+           names.attr=1:12,as.table=TRUE,col.regions=lm.palette(64),layout=c(4,3),colorkey=list(width=0.75),
+           main=list(paste("Beat-level (Normalized) Local Moran's I (",as.character(i),")",sep=""),cex=1), pretty=T)
+    print(f)
+  }
+},movie.name = paste(figPath,"LocMoran08_14_animation.gif",sep=""), ani.width=1200, ani.height=900, interval=1)  
+```
+![LocalMoran animation](LocMoran08_14_animation.gif) 

@@ -1,0 +1,227 @@
+---
+title: "Violent Crime Data Exploratory Analysis"
+date: "March 31, 2015"
+output: html_document
+---
+
+```{r load-data,echo=FALSE, cache=TRUE}
+setwd("/Users/xiaomuliu/CrimeProject/SpatioTemporalModeling/ExploratoryAnalysis/CrimeDataSTAnalysis/")
+source("importCrimeData.R")
+filePath <- "/Users/xiaomuliu/CrimeProject/SpatioTemporalModeling/ExploratoryAnalysis/CPD_DWH/"
+fileName <- "X_VIOLENTCRIME_POINTS_01_14.csv"
+CrimeData <- importCrimeData(filePath,fileName)
+```
+
+After pulling the data from CPD data warehouse, the data has a format that looks like:
+```{r head,echo=FALSE,cache=TRUE}
+head(CrimeData,3)
+```
+
+A preview of the variables
+```{r str,echo=FALSE, cache=TRUE}
+str(CrimeData)
+```
+
+A summary of the data
+```{r summary, echo=FALSE, cache=TRUE}
+summary(CrimeData)
+```
+
+The summary of how the crime counts are distributed in each **area**
+```{r,echo=FALSE, cache=TRUE}
+table(CrimeData$AREA,useNA="ifany")
+```
+and in each **district**
+```{r,echo=FALSE, cache=TRUE}
+table(CrimeData$DISTRICT,useNA="ifany")
+```
+What need to be noticed are (a) District 31 only has 8 incidents, and (b) Area 0 only has 3 incidents during the 7 year period.
+
+Most of the missing values (appearing in attribute AREA,DISTRICT and BEAT) have identical row indices.
+```{r missing,echo=FALSE,results='hide', cache=TRUE}
+which(is.na(CrimeData$AREA))
+which(is.na(CrimeData$DISTRICT))
+which(is.na(CrimeData$BEAT))
+```
+
+From the shape files provided by CPD, the area, district and beat polygon maps are shown below
+```{r shp-plot,echo=FALSE,message=FALSE, warning=FALSE, fig.showtext=FALSE, fig.width=10,fig.height=5, cache=TRUE}
+library(rgdal)
+shapefilePath <- "/Users/xiaomuliu/CrimeProject/SpatioTemporalModeling/CPDShapeFiles/"
+area.rg <- readOGR(shapefilePath, "area_bndy")
+district.rg <- readOGR(shapefilePath, "district_bndy")
+beat.rg <- readOGR(shapefilePath, "beat_bndy")
+par(mfrow=c(1,3))
+plot(area.rg, border="black",main="CPD AREAS")
+box(which = "plot", lty = "solid")
+plot(district.rg, border="black",main="CPD DISTRICTS")
+box(which = "plot", lty = "solid")
+plot(beat.rg, border="black",main="CPD DISTRICTS")
+box(which = "plot", lty = "solid")
+```
+
+A scatter point plot of violent crime locations for a certain day (*2014-01-01*)
+```{r pts-shp-plot,echo=FALSE, message=FALSE, warning=FALSE, cache=TRUE}
+library(sp)
+day <- as.Date("2014-01-01")
+DailyCrime <- subset(CrimeData,DATEOCC == day,select = c("DATEOCC","X_COORD","Y_COORD","INC_CNT"))
+DailyCrime.sp <- SpatialPoints(coords=DailyCrime[,c("X_COORD","Y_COORD")])
+plot(district.rg, border="black",main=list(paste("Violent Crime Locations (", day,")",sep=""),cex=0.75))
+points(DailyCrime.sp,pch=16, cex=.5,col="red")
+```
+
+Let's first aggregate data by policing beat/district to see if there is, if any, spatial and temporl pattern at beat/district level. Both of the plots below try to unveil if different districts have similar seasonal patterns or not.
+
+```{r aggregate-district, echo=FALSE, message=FALSE, warning=FALSE, fig.width=10,fig.height=8, cache=TRUE}
+# aggregated by "beat"/"district"
+CrimeData.beat <- aggregate(INC_CNT~BEAT+DATEOCC+YEAR+MONTH+DOW,data=CrimeData, FUN=sum, na.rm=TRUE)
+CrimeData.beat <- CrimeData.beat[order(CrimeData.beat$DATEOCC),]
+CrimeData.beat$DOW <- factor(CrimeData.beat$DOW, levels=c("Sun","Mon","Tue","Wed","Thu","Fri","Sat"))
+CrimeData.district <- aggregate(INC_CNT~DISTRICT+DATEOCC+YEAR+MONTH+DOW,data=CrimeData, FUN=sum, na.rm=TRUE)
+CrimeData.district <- CrimeData.district[order(CrimeData.district$DATEOCC),]
+CrimeData.district$DOW <- factor(CrimeData.district$DOW, levels=c("Sun","Mon","Tue","Wed","Thu","Fri","Sat"))
+
+CrimeData.beat_month <- aggregate(INC_CNT~BEAT+YEAR+MONTH,data=CrimeData.beat, FUN=sum, na.rm=TRUE)
+CrimeData.district_month <- aggregate(INC_CNT~DISTRICT+YEAR+MONTH,data=CrimeData.district, FUN=sum, na.rm=TRUE)
+
+library(lattice)
+xyplot(INC_CNT ~ DATEOCC | DISTRICT, data = CrimeData.district, pch=16, cex=0.5, layout = c(6, 5),
+       as.table=TRUE, xlab="Day", ylab="Violent Crime Count", 
+       main=list(label="Daily Violent Crime Counts over each District (2008-2014)",cex=0.8))
+
+xyplot(INC_CNT ~ MONTH | DISTRICT, data = CrimeData.district_month, groups = YEAR, pch=16, cex=0.5, layout = c(6, 5), 
+       as.table=TRUE, col=c("black","yellow","blue","red","green","purple","orange"), 
+       key=list(text=list(as.character(2008:2014)),points=list(pch=16),cex=1,space="bottom",
+                col=c("black","yellow","blue","red","green","purple","orange")),
+       xlab="Month", ylab="Violent Crime Count", 
+       main=list(label="Monthly Violent Crime Counts over each District (2008-2014)",cex=0.8))
+```
+
+The top plot shows the daily crime time series. Note that the series of district 13, 21, and 23 seem to be truncated. It turned out that data of distirct 13, 21 and 13 is only avaiable up to 2012/12/16, 2013/03/02, and 2013/03/01 respectively. For the bottom plot, the crime counts were first grouped by year and then aggregated by district and month. Interestingly, seasonal patterns do vary in different districts.    
+
+Grouping by beat would present higher resolution view of spatial and temporal patterns. However, as we have nearly 300 beats, instead of using muit-panel plots, we resorted to heap map to show these patterns.
+
+```{r aggregate-beat, echo=FALSE, message=FALSE, warning=FALSE, fig.width=7,fig.height=7, fig.align='center',cache=TRUE}
+library(reshape)
+# reshape the monthly beat data to wide format 
+beat_month.long <- CrimeData.beat_month[order(CrimeData.beat_month$BEAT,CrimeData.beat_month$YEAR),]
+beat_month.wide <- cast(beat_month.long, BEAT~YEAR+MONTH, fun.aggregate=sum)
+row.names(beat_month.wide) <- beat_month.wide$BEAT
+beat_month.matrix <- data.matrix(beat_month.wide[,2:ncol(beat_month.wide)])
+
+library(fields)
+par(mar=c(5,5,5,7)) 
+image(x=1:ncol(beat_month.matrix),y=1:nrow(beat_month.matrix),z=t(beat_month.matrix), col=topo.colors(256),axes=FALSE,
+      xlab="",ylab="Beat",main="Monthly Violent Crime Counts over each Beat (2008-2014)",cex.main=0.8)
+axis(side=1,at=1:ncol(beat_month.matrix), labels = colnames(beat_month.matrix),las=2,cex.axis = 0.8)
+axis(side=2,at=1:nrow(beat_month.matrix), labels = rownames(beat_month.matrix),las=2,cex.axis = 0.3)
+box()
+image.plot(x=1:ncol(beat_month.matrix),y=1:nrow(beat_month.matrix),z=t(beat_month.matrix), col=topo.colors(256),
+           legend.only=TRUE,legend.width=0.5)
+```
+
+Again, some beats have strong decreaseing periodic seasonal trend while some others don't. And the crime counts in adjacent beats are usually close. 
+
+Now let's move from regional analysis to city-wide analysis. Here is a incident location plot of year 2014.
+
+```{r monthly-pts, echo=FALSE, message=FALSE, warning=FALSE, fig.width=10,fig.height=8, cache=TRUE}
+figPath = "/Users/xiaomuliu/CrimeProject/SpatioTemporalModeling/ExploratoryAnalysis/CrimeDataSTAnalysis/"
+year = 2014  
+CrimeData.byYear <- subset(CrimeData,YEAR==year,select=c(MONTH,X_COORD,Y_COORD,INC_CNT))
+xyplot(Y_COORD ~ X_COORD | factor(MONTH), data=CrimeData.byYear, pch=16, cex=0.4,as.table=TRUE,
+              xlab="X Coordinate", ylab="Y Coordinate",
+              main=list(label=paste("Violent Crime Locations over each Month (",as.character(year),")",
+                                    sep=""), cex=0.8))
+```
+
+It is difficult to examine if crime location clusters are time-varying just by looking at the point plots. Let's move to grid(pixel)-based analysis. First, the point data was rasterized through binning into a 100 $\times$ 100 grid (the boundaries were defined by the range of x-coordinate and y-coordinate from all available crime locations plus a margin of 1000 unit on each side). Here shows an example of pixelized violent crime locations in January 2014.
+
+```{r raster, echo=FALSE, message=FALSE, warning=FALSE, fig.align='center',cache=TRUE}
+X_range = range(CrimeData$X_COORD)
+Y_range = range(CrimeData$Y_COORD)
+margin = 1000
+X_range[1] <- X_range[1]-margin
+X_range[2] <- X_range[2]+margin
+Y_range[1] <- Y_range[1]-margin
+Y_range[2] <- Y_range[2]+margin
+
+year = 2014
+month = 1
+CrimeData.byYearMonth <- subset(CrimeData,YEAR==year&MONTH==month,select=c(X_COORD,Y_COORD,INC_CNT))
+
+library(sp)
+library(raster)
+r <- raster(ncol=100,nrow=100,xmn=X_range[1],xmx = X_range[2],ymn=Y_range[1],ymx = Y_range[2])
+CrimeData.YMraster <- rasterize(CrimeData.byYearMonth[,c("X_COORD","Y_COORD")], r, CrimeData.byYearMonth$INC_CNT, fun=sum)
+plot(CrimeData.YMraster,panel.first=grid(100,100,col = "lightgray", lty = "dotted"),col=topo.colors(256))
+```
+
+Next, we do kernel density estimation (KDE) of the monthly aggregation over each year. The kernel applied here is a 2D Gaussian kernel with the same bandwidth in each direction. The bandwidth was selected through (minimizing MSE) cross-valiation using all available data (08-14). The figure below shows the KDE for each month for year 2014.
+
+```{r bw-kernel, echo=FALSE, message=FALSE, warning=FALSE, fig.width=5,fig.height=5, fig.align='center', cache=TRUE}
+# First find the opitmal bandwidth of the Gaussian kernels through cross-valiation (minimizing MSE, data 08-14)
+library(spatstat)
+CrimeData.raster <- rasterize(CrimeData[,c("X_COORD","Y_COORD")], r, CrimeData$INC_CNT, fun=sum)
+rasterMat <- matrix(CrimeData.raster@data@values,100,100)
+rasterMat[is.na(rasterMat)] = 0
+grd <- expand.grid(list(X_COORD = seq(X_range[1], X_range[2], length.out=100), 
+                        Y_COORD = seq(Y_range[1], Y_range[2], length.out=100)))
+CrimeData.pp <- ppp(grd$X_COORD,grd$Y_COORD,window=owin(xrange=X_range,yrange=Y_range),marks=as.vector(rasterMat))
+h <- bw.diggle(CrimeData.pp)
+plot(h,ylab="MSE",main=list("Find the opitmal kernel bandwidth via minimizing-MSE CV",cex=0.8))
+h <- round(as.numeric(h))
+```
+
+```{r KDE-example, echo=FALSE, message=FALSE, warning=FALSE, fig.width=10,fig.height=8, cache=TRUE}
+# Now apply this optimal kernel to each monthly-aggregated data
+library(KernSmooth)
+KDE.df <- do.call(rbind, replicate(12, grd, simplify = FALSE))
+KDE.df$MONTH = rep(1:12, each=10000)
+KDE.df$VALUE = rep(NA,12*10000)
+
+for (j in 1:12){
+  CrimeData.YMsub <- subset(CrimeData,YEAR==year&MONTH==j,select=c(X_COORD,Y_COORD,INC_CNT))
+    
+  kernSm <- bkde2D(data.matrix(CrimeData.YMsub[,c("X_COORD","Y_COORD")]), bandwidth=c(h,h), 
+                    gridsize=c(100, 100), range.x=list(X_range,Y_range))
+    
+  KDE.df[KDE.df$MONTH==j,]$VALUE <- as.vector(kernSm$fhat)     
+}
+levelplot(VALUE~X_COORD*Y_COORD|as.factor(MONTH), data=KDE.df,col.regions=topo.colors(256),as.table=TRUE,
+          xlab="X Coordinate", ylab="Y Coordinate", colorkey=list(width=0.5,height=0.8),
+          main = list(label=paste("Kernel Density Estimation of Monthly Violent Crime Counts (",as.character(year),")",
+                 sep=""), cex=0.8))
+```
+
+Here displays an animation of KDE for each year (08-14). It does not show there exists obvious crime *hot* spot migration throughout all the years being studied.
+
+```{r kde-animation, echo=FALSE, message=FALSE, warning=FALSE, cache=TRUE}
+library(animation)
+flag<-saveGIF({# KDE looping over month and year
+  for (k in unique(CrimeData$YEAR)){  
+    # create a KDE data frame for 'leveplot'
+    grd <- expand.grid(list(X_COORD = seq(X_range[1], X_range[2], length.out=100), 
+                            Y_COORD = seq(Y_range[1], Y_range[2], length.out=100)))
+    KDE.df <- do.call(rbind, replicate(12, grd, simplify = FALSE))
+    KDE.df$MONTH = rep(1:12, each=10000)
+    KDE.df$VALUE = rep(NA,12*10000)
+    
+    for (j in 1:12){
+      CrimeData.YMsub <- subset(CrimeData,YEAR==k&MONTH==j,select=c(X_COORD,Y_COORD,INC_CNT))
+      
+      kernSm <- bkde2D(data.matrix(CrimeData.YMsub[,c("X_COORD","Y_COORD")]), bandwidth=c(h,h), 
+                       gridsize=c(100, 100), range.x=list(X_range,Y_range))
+      
+      KDE.df[KDE.df$MONTH==j,]$VALUE <- as.vector(kernSm$fhat)     
+    }
+    
+    f <- levelplot(VALUE~X_COORD*Y_COORD|as.factor(MONTH), data=KDE.df,col.regions=topo.colors(256),as.table=TRUE,
+                   xlab="X Coordinate", ylab="Y Coordinate", colorkey=list(width=0.5,height=0.8),
+                   main = list(label=paste("Kernel Density Estimation of Monthly Violent Crime Counts (",as.character(k),")",
+                                           sep=""), cex=1.2))
+    print(f)
+  }
+},movie.name = paste(figPath,"KDE_08_14_animation.gif",sep=""), ani.width=1200, ani.height=900, interval=1)
+```
+
+![KDE animation](KDE_08_14_animation.gif) 

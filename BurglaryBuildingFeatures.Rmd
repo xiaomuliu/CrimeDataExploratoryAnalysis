@@ -1,0 +1,123 @@
+---
+title: "BurglaryBuildingFeatures"
+date: "September 10, 2015"
+output: html_document
+---
+
+```{r load-crimedata,echo=FALSE,warning=FALSE,message=FALSE,cache=TRUE}
+library(sp)
+library(rgeos)
+library(rgdal)
+
+setwd("/Users/xiaomuliu/CrimeProject/SpatioTemporalModeling/ExploratoryAnalysis/Features/")
+# source("importCrimeData.R")
+# filePath <- "/Users/xiaomuliu/CrimeProject/SpatioTemporalModeling/ExploratoryAnalysis/CPD_DWH/"
+# fileName <- "X_BURGLARY_POINTS_08_14.csv"
+# BurglaryData <- importCrimeData(filePath,fileName)
+# row.names(BurglaryData) <- NULL
+# 
+# shapefilePath.new <- "/Users/xiaomuliu/CrimeProject/SpatioTemporalModeling/CPDShapeFiles/new/"
+# beat_new.rg <- readOGR(paste0(shapefilePath.new,"cpd_beats"), "cpd_beats")
+# district_new.rg <- readOGR(paste0(shapefilePath.new, "cpd_districts"),"cpd_districts")
+# # centroids 
+# Crd.beat <- coordinates(beat_new.rg)
+# Crd.district <- coordinates(district_new.rg)
+# 
+# ## Match old and new beat 
+# # Matching the old beat records and the new one by finding which new beat polygon the point falls in
+# # and then re-assign that beat number to that crime record. 
+# # Therefore all crime beat records have a unified reference which is the new beat map.
+# source("DataPolyMatching.R")
+# Match1 <- DataMatching2(BurglaryData,beat_new.rg,area="BEAT")
+# BurglaryData <- Match1$CrimeData
+# Match2 <- DataMatching2(BurglaryData,district_new.rg,area="DISTRICT")
+# BurglaryData <- Match2$CrimeData
+# 
+# ## Aggregated by "beat" and add 'holiday' attribute
+# source("HolidayChart.R")
+# BurglaryData$HOLIDAY <- sapply(BurglaryData$DATEOCC,FUN=holidays)
+# BurglaryData$HOLIDAY <- factor(BurglaryData$HOLIDAY)
+
+load("MatchedBurglaryData_portal.RData")
+```
+
+We take a subset of burglary data so that contains only 2008-2014 records to relieve computational burden. The regular grid is made by setting up a 120 $\times$ 160 grid then constraint it by keeping those inside the city boundary, in which 7724 grids are included.
+
+```{r setup, echo=FALSE, message=FALSE, warning=FALSE, fig.align='center',fig.width=6, fig.height=4.5, cache=TRUE}
+Path.GIS <- "/Users/xiaomuliu/CrimeProject/SpatioTemporalModeling/GISData/"
+YearList <- 2008:2014
+BurglaryData.sub <- subset(BurglaryData,YEAR>=2008&YEAR<=2014)
+
+Path.city <- "/Users/xiaomuliu/CrimeProject/SpatioTemporalModeling/GISData/City_Boundary"
+city.shp <- readOGR(Path.city,"City_Boundary") 
+ncell.x <- 120
+ncell.y <- 160
+X_range <- city.shp@bbox[1,]
+Y_range <- city.shp@bbox[2,]
+grd.full <- expand.grid(list(X_COORD=seq(X_range[1],X_range[2],length.out=ncell.x),
+                             Y_COORD=seq(Y_range[1],Y_range[2],length.out=ncell.y)))
+coordinates(grd.full) = ~X_COORD+Y_COORD # convert to SpatialPoints
+proj4string(grd.full) <- proj4string(city.shp)
+
+grdInCity <- over(grd.full,as(city.shp,"SpatialPolygons"))
+grd.inCity <- grd.full[!is.na(grdInCity)]
+
+RegGrd <- as.data.frame(grd.inCity@coords)
+
+plot(grd.inCity,pch=16,cex=0.1,main="Regular grids within city boundary",cex.main=0.8)
+box(which = "plot", lty = "solid")
+```
+
+Due the extremely big building ground file size (~3GB), we do not plot it here.
+```{r load-building-shapefile, echo=FALSE, message=FALSE, warning=FALSE, fig.align='center',fig.width=10, fig.height=4.5, cache=TRUE}
+Path.building <- "/Users/xiaomuliu/CrimeProject/SpatioTemporalModeling/GISData/Buildings"
+building.shp <- readOGR(Path.building,"Buildings")  # ~3 GB file!
+# plot(building.shp,main="Buildings")
+# # plot(city.shp,add=TRUE)
+# box(which = "plot", lty = "solid")
+
+building.spdf <- building.shp
+building.spdf@data <- subset(building.spdf@data,select=c("BLDG_ID","BLDG_STATU","STORIES","NO_OF_UNIT","NO_STORIES",
+                                                         "NON_STANDA","YEAR_BUILT","BLDG_SQ_FO","BLDG_CONDI","VACANCY_ST",
+                                                         "X_COORD","Y_COORD","SHAPE_AREA","SHAPE_LEN"))
+#remove "non-standard" building: 8500, CTAPLAT, MONUMNET, OTHER, keep only residential garage and NA's
+building.spdf <- building.spdf[building.spdf@data$NON_STANDA=="RSGARAGE" | is.na(building.spdf@data$NON_STANDA),]
+
+rm(building.shp)
+```
+
+If we could match buildings of each burglary, then we'd be able to find the associated building characteristics such as number of units. (Building shape file data has these attributes that might be useful: building status, stories, number of unit, year built, building square foot, building condition) Unfortunately, we can't match the incident locations and buildings using a simple method. The following figures illustrate why. Plus, CPD's crime data has street numbers and street names for most of the burglary incidents while building shape file doesn't. Even if it had, it'd be very difficult to match text information using regular expression as texts are recorded in various formats.
+
+```{r incident-building-match, echo=FALSE, message=FALSE, warning=FALSE, fig.align='center',fig.width=10, fig.height=4.5, cache=TRUE}
+inc_no <- 1:3
+margin <- 100
+par(mfrow=c(1,3))
+for (i in inc_no){
+  Inc <- BurglaryData.sub[i,]
+  Inc.sp <- SpatialPoints(coords=Inc[,c("X_COORD","Y_COORD")])
+  match_idx <- with(building.spdf@data, X_COORD>=Inc$X_COORD-margin & X_COORD<=Inc$X_COORD+margin
+                   & Y_COORD>=Inc$Y_COORD-margin & Y_COORD<=Inc$Y_COORD+margin)
+
+  plot(building.spdf[match_idx,])
+  points(Inc.sp,pch=16,cex=0.9,col="red")
+}
+```
+
+We calculate the nearby building density for each incident. Based on the fact that 1 mile has 8 blocks so that one block is about 660 ft long, we define the proximity by extending 330 ft in x-y direction of an incident, that is 1 sq miles square region of that incident.
+
+```{r nearby-building-density, echo=FALSE, message=FALSE, warning=FALSE, fig.align='center',fig.width=10, fig.height=4.5, cache=TRUE}
+source("POIFunction.R")
+extension.x <- 330
+extension.y <- 330
+extension <- c(extension.x,extension.y)
+
+BurglaryData.sub <- BuildingDen(BurglaryData.sub,building.spdf,extension,Attr="BldgDen")
+RegGrd <- BuildingDen(RegGrd,building.spdf,extension,Attr="BldgDen")
+
+par(mfrow=c(1,2))
+hist(BurglaryData.sub$BldgDen,breaks=100,xlab="Number of Nearby Buildings", freq=FALSE,cex.main=0.55,
+     main="Histogram of the nearby building densities of burglary incidents")
+hist(RegGrd$BldgDen,breaks=100,xlab="Number of Nearby Buildings", freq=FALSE,cex.main=0.55,
+     main="Histogram of the nearby building densities of regular grids")
+```
+

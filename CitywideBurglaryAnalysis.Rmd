@@ -1,0 +1,309 @@
+---
+title: "CitywideBurglaryAnalysis"
+date: "August 25, 2015"
+output: html_document
+---
+
+```{r load-crimedata,echo=FALSE, cache=TRUE}
+setwd("/Users/xiaomuliu/CrimeProject/SpatioTemporalModeling/ExploratoryAnalysis/BurglaryAnalysis/")
+source("importCrimeData.R")
+filePath <- "/Users/xiaomuliu/CrimeProject/SpatioTemporalModeling/ExploratoryAnalysis/DataPortal/"
+fileName <- "BURGLARY_01_14.csv"
+BurglaryData <- importCrimeData(filePath,fileName)
+row.names(BurglaryData) <- NULL
+```
+
+The beat and district numbers in the data were re-assigned by finding in which new beat/district polygon the point falls and then label that beat/district number. Therefore all burglary beat and district records have a unified reference which is the new CPD beat/district map.
+
+```{r rearrange-data,echo=FALSE,message=FALSE,warning=FALSE,cache=TRUE}
+library(rgdal)
+shapefilePath.new <- "/Users/xiaomuliu/CrimeProject/SpatioTemporalModeling/CPDShapeFiles/new/"
+beat_new.rg <- readOGR(paste0(shapefilePath.new,"cpd_beats"), "cpd_beats")
+district_new.rg <- readOGR(paste0(shapefilePath.new, "cpd_districts"),"cpd_districts")
+
+## Match old and new beat and district
+# Matching the old beat records and the new one by finding which new beat polygon the point falls in
+# and then re-assign that beat number to that burglary record. 
+# Therefore all Burglary beat records have a unified reference which is the new beat map.
+source("DataPolyMatching.R")
+Match1 <- DataMatching2(BurglaryData,beat_new.rg,area="BEAT")
+BurglaryData <- Match1$CrimeData
+Match2 <- DataMatching2(BurglaryData,district_new.rg,area="DISTRICT")
+BurglaryData <- Match2$CrimeData
+
+## Add 'holiday' attribute
+source("HolidayChart.R")
+BurglaryData$HOLIDAY <- sapply(BurglaryData$DATEOCC,FUN=holidays)
+BurglaryData$HOLIDAY <- factor(BurglaryData$HOLIDAY)
+
+```
+
+```{r crime-timeseries, echo=FALSE, message=FALSE, warning=FALSE, fig.align='center',fig.width=8, fig.height=6, cache=TRUE}
+## Burglary time series
+BurglaryData.day <- aggregate(INC_CNT~DATEOCC+YEAR+MONTH+DOW+HOLIDAY,data=BurglaryData, FUN=sum, na.rm=TRUE)
+BurglaryData.day <- BurglaryData.day[order(BurglaryData.day$DATEOCC),]
+BurglaryData.day$DOW <- factor(BurglaryData.day$DOW, levels=c("Sun","Mon","Tue","Wed","Thu","Fri","Sat"))
+# plot(BurglaryData.day$DATEOCC, BurglaryData.day$INC_CNT,type="p",pch=16,cex=0.25,col="blue",
+#      xlab="DATE",ylab="Burglary Count")
+```
+
+```{r detrending, echo=FALSE, message=FALSE, warning=FALSE, fig.align='center',fig.width=8, fig.height=6, cache=TRUE}
+# Detrending
+library(MASS)
+source("TimeSeriesFunction.R")
+
+#Smooth out holiday cases
+BurglaryData.day$INC_CNT_s <- SmoothHoliday(BurglaryData.day)
+
+trendLen <- 730
+BurglaryData.buffer <- BurglaryData.day[1:trendLen,]
+BurglaryData.nonbuffer <- BurglaryData.day[(trendLen+1):nrow(BurglaryData.day),]
+BurglaryData.nonbuffer$TStrend <- rep(NA,nrow(BurglaryData.nonbuffer))
+BurglaryData.nonbuffer$TSdetrendRes <- rep(NA,nrow(BurglaryData.nonbuffer))
+
+Trend <- PredictTrend(BurglaryData.day,trendLen,nlfit="IRLS") 
+BurglaryData.nonbuffer$TStrend <- Trend
+BurglaryData.nonbuffer$TSdetrendRes <- BurglaryData.nonbuffer$INC_CNT_s-BurglaryData.nonbuffer$TStrend  
+
+# plot(BurglaryData.nonbuffer$DATEOCC, BurglaryData.nonbuffer$INC_CNT,type="p",pch=16,cex=0.3,col="blue",
+#      xlab="DATE",ylab="Burglary Count",main="Daily Burglary Incidents and Predicted Trend")
+# points(BurglaryData.nonbuffer$DATEOCC, BurglaryData.nonbuffer$TStrend,type="b",pch=16,cex=0.3,col="green")
+# legend("topright",legend=c("Actual","Trend"),col=c("blue","green"),pch=c(16,16))
+```
+
+The following box plots show the distributions of daily burglaries over month/day of week/holiday.
+
+```{r crime-time-relationship1, echo=FALSE, message=FALSE, warning=FALSE, fig.align='center',fig.width=8, fig.height=6, cache=TRUE,eval=FALSE}
+## Relationship between burlgary and month, DOW, holiday
+BurglaryData.month <- aggregate(INC_CNT~DATEOCC+MONTH,data=BurglaryData, FUN=sum, na.rm=TRUE)
+boxplot(INC_CNT~MONTH,BurglaryData.month,xaxt="n",ylab="Burglary Count",
+        main="City-wide daily burglary incidents by month",cex.main=0.8)
+axis(side=1,at=1:12, labels=c("Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"),las=1,cex.axis=1)
+
+BurglaryData.dow <- aggregate(INC_CNT~DATEOCC+DOW, data=BurglaryData, FUN=sum, na.rm=TRUE)
+boxplot(INC_CNT~DOW,BurglaryData.dow,ylab="Burglary Count",
+        main="City-wide daily burglary incidents by day of week",cex.main=0.8)
+
+BurglaryData.holiday <- aggregate(INC_CNT~DATEOCC+HOLIDAY, data=BurglaryData, FUN=sum, na.rm=TRUE)
+boxplot(INC_CNT~HOLIDAY,BurglaryData.holiday,ylab="Burglary Count",
+        main="City-wide daily burglary incidents by holiday",cex.main=0.8)
+
+HolidayChart <- data.frame(Holiday=c("Non-holiday","New Year's Day","M.L.K's Day","Washington's Birthday","Memorial Day",
+                                     "4th of July","Labor Day","Columbus Day","Halloween","Veterans Day","Thanksgiving",
+                                     "Christmas"), Code=0:11)
+library(knitr)
+kable(HolidayChart, format="markdown")
+```
+
+```{r crime-time-relationship, echo=FALSE, message=FALSE, warning=FALSE, fig.align='center',fig.width=10, fig.height=4, cache=TRUE}
+## Relationship between burlgary and month, DOW, holiday
+par(mfrow=c(1,2))
+boxplot(INC_CNT~MONTH,BurglaryData.nonbuffer,xaxt="n",ylab="Burglary Count",
+        main="City-wide daily burglary incidents by month",cex.main=0.8)
+axis(side=1,at=1:12, labels=c("Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"),las=1,cex.axis=1)
+
+boxplot(TSdetrendRes~MONTH,BurglaryData.nonbuffer,xaxt="n",ylab="Detrending Residual",
+        main="Detrended city-wide daily burglary incidents by month",cex.main=0.8)
+axis(side=1,at=1:12, labels=c("Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"),las=1,cex.axis=1)
+
+
+boxplot(INC_CNT~DOW,BurglaryData.nonbuffer,ylab="Burglary Count",
+        main="City-wide daily burglary incidents by day of week",cex.main=0.8)
+boxplot(TSdetrendRes~DOW,BurglaryData.nonbuffer,ylab="Detrending Residual",
+        main="Detrended city-wide daily burglary incidents by day of week",cex.main=0.8)
+
+
+boxplot(INC_CNT~HOLIDAY,BurglaryData.nonbuffer,ylab="Burglary Count",
+        main="City-wide daily burglary incidents by holiday",cex.main=0.8)
+# boxplot(TSdetrendRes~HOLIDAY,BurglaryData.nonbuffer,ylab="Detrending Residual",
+#         main="Detrended city-wide daily burglary incidents by holiday",cex.main=0.8)
+boxplot(INC_CNT-TStrend~HOLIDAY,BurglaryData.nonbuffer,ylab="Detrending Residual",
+        main="Detrended city-wide daily burglary incidents by holiday",cex.main=0.8)
+
+HolidayChart <- data.frame(Holiday=c("Non-holiday","New Year's Day","M.L.K's Day","Washington's Birthday","Memorial Day",
+                                     "4th of July","Labor Day","Columbus Day","Halloween","Veterans Day","Thanksgiving",
+                                     "Christmas"), Code=0:11)
+library(knitr)
+kable(HolidayChart, format="markdown")
+```
+
+The correlations between weather and  (a) daily burglary (raw data) and (b) detrended residuals are shown below. 
+
+```{r crime-weather-corr,echo=FALSE, message=FALSE, warning=FALSE, cache=TRUE}
+## Burglary and weather correlation
+source("WeatherDataFunctions.R")
+WeatherFilePath <- "/Users/xiaomuliu/CrimeProject/SpatioTemporalModeling/ExploratoryAnalysis/WeatherData/"
+startDate="01/01/2001"
+endDate="12/31/2014"
+filename.daily <- paste(WeatherFilePath,'WeatherData_Daily_',as.character(as.Date(startDate, "%m/%d/%Y")),
+                        '_',as.character(as.Date(endDate, "%m/%d/%Y")),'.csv',sep='')
+WeatherData.daily <- read.csv(filename.daily)
+WeatherData.daily$Date <- as.Date(WeatherData.daily$Date)
+WeatherData.daily_diff <- DailyWeatherDiff(WeatherData.daily)
+
+WeatherData.nonbuffer <- WeatherData.daily[(trendLen+1):nrow(WeatherData.daily),]
+WeatherDataDiff.nonbuffer <- WeatherData.daily_diff[(trendLen-1):nrow(WeatherData.daily_diff),] 
+
+corrcoef.raw <- cor(WeatherData.nonbuffer[,-1],BurglaryData.nonbuffer$INC_CNT)
+corrcoef.res <- cor(WeatherData.nonbuffer[,-1],BurglaryData.nonbuffer$TSdetrendRes)
+
+# library(knitr)
+# kable(corrcoef.raw, format="markdown",digits=2)
+# kable(corrcoef.raw, format="markdown",digits=2)
+sprintf("Weather and raw data correlations:")
+print(corrcoef.raw)
+sprintf("Weather and detrended data correlations:")
+print(corrcoef.res)
+```
+
+Since there is barely any correlation between weather variables and detrended burglary data, the input variables that were taken into account are only **day of week** and **lagged varibles** (lag-1,lag-2,lag-7). (Experiments show that including weather variables had almost identical prediction accuarcy in terms of MSE. So we did not include them in favor of simple models.)
+
+```{r crime-regression,echo=FALSE, message=FALSE, warning=FALSE, cache=TRUE}
+## Time series regression
+require(glmnet)
+require(dummies)
+require(doMC)
+registerDoMC(cores=4)
+
+glm <- "gaussian"
+# varSet <- c("DOW","weather","weatherdiff","timelag")
+varSet <- c("DOW","timelag")
+standardize <- "minmax"
+Windowing <- TRUE
+nlambda <- 20
+lambdaSeq <- 2^seq(-5,0.5,by=0.5)
+parallel <- TRUE
+
+startDate.eval = as.Date("2012-01-01")
+endDate.eval <- as.Date("2014-12-31")
+dateSeq.eval <- seq.Date(startDate.eval,endDate.eval,by=1)
+Ntrain <- 365*12
+winSize <- 90
+winNum <- 12
+
+BurglaryData.eval <- subset(BurglaryData.nonbuffer,DATEOCC %in% dateSeq.eval)
+BurglaryData.eval$TSresPred <- rep(NA,nrow(BurglaryData.eval))
+BurglaryData.eval$HolidayCorrection <- rep(NA,nrow(BurglaryData.eval))
+
+selectData <- VariableSet(varSet,BurglaryData.nonbuffer,WeatherData.nonbuffer,WeatherDataDiff.nonbuffer,glm)
+X <- selectData$X
+y <- selectData$y
+BurglaryData.nonbuffer2 <- selectData$crimeData
+
+ptm <- proc.time()
+for (i in 1:length(dateSeq.eval)){
+  
+  # pinpoint the training time range
+  d <- dateSeq.eval[i]
+  startDate.train <- d-Ntrain
+  endDate.train <- d-1
+  dateSeq.train <- seq.Date(startDate.train,endDate.train,by=1)
+  
+#   BurglaryData.test <- subset(BurglaryData.nonbuffer,DATEOCC==d)
+#   WeatherData.test <- subset(WeatherData.nonbuffer,Date==d)
+#   WeatherDataDiff.test <- subset(WeatherDataDiff.nonbuffer,Date==d)
+  
+  if (Windowing){
+    dateWindow <- HistDateWindows(dateSeq.train,d,windowSize=winSize,windowNum=winNum,interval=365.25,dir="backward")
+#     BurglaryData.train <- subset(BurglaryData.nonbuffer,DATEOCC %in% dateWindow$histDates)
+#     WeatherData.train <- subset(WeatherData.nonbuffer,Date %in% dateWindow$histDates)
+#     WeatherDataDiff.train <- subset(WeatherDataDiff.nonbuffer,Date %in% dateWindow$histDates)
+    idx.tr <- BurglaryData.nonbuffer2$DATEOCC %in% dateWindow$histDates
+  }else{
+    # use all training data
+#     BurglaryData.train <- subset(BurglaryData.nonbuffer,DATEOCC %in% dateSeq.train)
+#     WeatherData.train <- subset(WeatherData.nonbuffer, Date %in% dateSeq.train)
+#     WeatherDataDiff.train <- subset(WeatherDataDiff.nonbuffer, Date %in% dateSeq.train)
+    idx.tr <- BurglaryData.nonbuffer2$DATEOCC %in% dateSeq.train
+  }
+
+  idx.te <- BurglaryData.nonbuffer2$DATEOCC %in% d 
+  X.train_raw <- X[idx.tr,]
+  y.train <- y[idx.tr]
+  X.test_raw <- X[idx.te,]
+  y.test <- y[idx.te]
+
+#   selectData.train <- VariableSet(varSet,BurglaryData.train,WeatherData.train,WeatherDataDiff.train,glm)
+#   selectData.test <- VariableSet(varSet,BurglaryData.test,WeatherData.test,WeatherDataDiff.test,glm)   
+#   X.train <- selectData.train$X
+#   y.train <- selectData.train$y   
+#   X.test <- selectData.test$X
+#   y.test <- selectData.test$y
+    
+  scaling.train <- Standardization(X.train_raw,X.train_raw,standardize,varSet,glm)    
+  scaling.test <- Standardization(X.train_raw,X.test_raw,standardize,varSet,glm)
+  X.train <- scaling.train$scaledData
+  X.test <- scaling.test$scaledData
+  scalingflag <- scaling.test$flag
+    
+#   cvfit <- cv.glmnet(as.matrix(X.train),as.vector(y.train),family=glm,standardize=scalingflag,nlambda=nlambda,parallel=parallel)       
+  cvfit <- cv.glmnet(as.matrix(X.train),as.vector(y.train),family=glm,standardize=scalingflag,lambda=lambdaSeq,parallel=parallel)   
+  fit.lasso <- glmnet(as.matrix(X.train),as.vector(y.train),family=glm,lambda=cvfit$lambda.min,standardize=scalingflag) 
+
+  y_hat.test <- predict(fit.lasso,newx=as.matrix(X.test),type="response")
+#   y_hat.train <- predict(fit.lasso,newx=as.matrix(X.train),type="response")     
+   
+  BurglaryData.eval$TSresPred[BurglaryData.eval$DATEOCC==d] <- y_hat.test
+#   BurglaryData.train$TSresPred <- y_hat.train
+    
+#   BurglaryData.train$TSpred <- BurglaryData.train$TSresPred+BurglaryData.train$TStrend
+#   BurglaryData.train$TSerr <- BurglaryData.train$INC_CNT-BurglaryData.train$TSpred
+
+  # Compenstate holiday cases
+  H_indicator <- BurglaryData.eval$HOLIDAY[BurglaryData.eval$DATEOCC==d]
+  if (H_indicator != 0){
+    if (H_indicator==1 & format(d,"%m-%d")!="01-01"){
+      # Do not compensate when the new year observation is not on Jan 1st
+      Correction <- 0
+    }
+    else{
+      # "back-predict" past few years' holidays
+      idx.holiday <- (BurglaryData.nonbuffer2$HOLIDAY == H_indicator)
+      X.holiday_raw <- X[idx.holiday,]
+      y.holiday <- BurglaryData.nonbuffer2$INC_CNT[idx.holiday]-BurglaryData.nonbuffer2$TStrend[idx.holiday]
+    
+      scaling.holiday<- Standardization(X.train_raw,X.holiday_raw,standardize,varSet,glm)
+      X.holiday <- scaling.holiday$scaledData
+    
+      y_hat.holiday <- predict(fit.lasso,newx=as.matrix(X.holiday),type="response")
+      Correction <- mean(y.holiday-y_hat.holiday)
+    }    
+  }
+  else{
+    # non-holiday days: no correction
+    Correction <- 0
+  }  
+
+  BurglaryData.eval$HolidayCorrection[BurglaryData.eval$DATEOCC==d] <- Correction
+}
+
+BurglaryData.eval <- within(BurglaryData.eval, TSpred <- TSresPred+TStrend+HolidayCorrection)
+BurglaryData.eval <- within(BurglaryData.eval, TSerr <- INC_CNT-TSpred)
+```
+
+```{r regression-result, echo=FALSE, message=FALSE, warning=FALSE, fig.align='center',fig.width=8, fig.height=6, cache=TRUE}
+par(mfrow=c(1,1))
+plot(BurglaryData.eval$DATEOCC, BurglaryData.eval$INC_CNT,type="p",pch=16,cex=0.5,col="blue",
+     xlab="DATE",ylab="Crime Count",main="Daily Crime Incidents and Predicted Values")
+points(BurglaryData.eval$DATEOCC, BurglaryData.eval$TSpred,type="p",pch=16,cex=0.5,col="red")
+points(BurglaryData.eval$DATEOCC, BurglaryData.eval$TStrend,type="b",pch=16,cex=0.5,col="green")
+legend("topright",legend=c("Actual","Predicted","Trend"),col=c("blue","red","green"),pch=c(16,16,16))
+
+MSE.pred <- with(BurglaryData.eval,round(mean((TSpred-INC_CNT)^2),2))
+RMSE.pred <- sqrt(MSE.pred)
+pMSE.pred <- MSE.pred / mean(BurglaryData.eval$INC_CNT^2)
+Rsq.pred <- with(BurglaryData.eval, 1-t(INC_CNT-TSpred)%*%(INC_CNT-TSpred)/(t(INC_CNT-mean(INC_CNT))%*%(INC_CNT-mean(INC_CNT))))
+
+MSE.trend<- with(BurglaryData.eval,round(mean((TStrend-INC_CNT)^2),2))
+RMSE.trend <- sqrt(MSE.trend)
+pMSE.trend <- MSE.trend / mean(BurglaryData.eval$INC_CNT^2)
+Rsq.trend <- with(BurglaryData.eval, 1-t(INC_CNT-TStrend)%*%(INC_CNT-TStrend)/(t(INC_CNT-mean(INC_CNT))%*%(INC_CNT-mean(INC_CNT))))
+
+sprintf("Predition: MSE = %.2f, RMSE = %.2f, percentage MSE = %.2f%%, R squared = %.2f\n",
+        MSE.pred, RMSE.pred, pMSE.pred, Rsq.pred)
+sprintf("Trend-only: MSE = %.2f, RMSE = %.2f, percentage MSE = %.2f%%, R squared = %.2f\n",
+        MSE.trend, RMSE.trend, pMSE.trend, Rsq.trend)
+```
+
+
+

@@ -1,0 +1,724 @@
+---
+title: "BurglaryFeatureMaps3"
+date: "October 2, 2015"
+output: html_document
+---
+
+```{r note, echo=FALSE, message=FALSE, warning=FALSE,cache=TRUE}
+# VERSION 3
+# Further Trim Building Shapefile Data
+# DIFFERENTIATE PROPERTY (RESIDENTIAL GARAGE, RESIDENTIAL/COMMERCIAL BUILDING) IN CALCULATING NEARBY BUILDING DENSITY
+# ADD BUILDING TYPE FEATURES
+```
+
+The regular grid is made by setting up a 180 $\times$ 240 grid then constraining it by keeping those inside the city boundary, in which 17472 grids are included (spatial resolution: 637 ft $\times$ 576 ft/pixel cell).
+
+```{r regular-grid, echo=FALSE, message=FALSE, warning=FALSE,cache=TRUE}
+library(sp)
+library(rgeos)
+library(rgdal)
+library(raster)
+
+Path.GIS <- "/Users/xiaomuliu/CrimeProject/SpatioTemporalModeling/GISData/"
+Path.city <- paste0(Path.GIS,"City_Boundary")
+city.shp <- readOGR(Path.city,"City_Boundary") 
+ncell.x <- 180
+ncell.y <- 240
+X_range <- city.shp@bbox[1,]
+Y_range <- city.shp@bbox[2,]
+grd.full <- expand.grid(list(X_COORD=seq(X_range[1],X_range[2],length.out=ncell.x),
+                             Y_COORD=seq(Y_range[1],Y_range[2],length.out=ncell.y)))
+coordinates(grd.full) = ~X_COORD+Y_COORD # convert to SpatialPoints
+
+prj <- paste("+proj=tmerc +lat_0=36.66666666666666 +lon_0=-88.33333333333333 +k=0.9999749999999999",
+             "+x_0=300000 +y_0=0 +datum=NAD83 +units=us-ft +no_defs +ellps=GRS80 +towgs84=0,0,0")
+proj4string(grd.full) <- prj
+
+# rasterize the city spatial polygon to get a grid template
+grd.full <- SpatialPixels(grd.full)
+r <- raster(ncol=grd.full@grid@cells.dim[1],nrow=grd.full@grid@cells.dim[2],
+            xmn=grd.full@bbox[1,1],xmx=grd.full@bbox[1,2],ymn=grd.full@bbox[2,1],ymx=grd.full@bbox[2,2],crs=CRS(prj))
+
+city.raster <- rasterize(city.shp,r,0)
+city.df_full <- as.data.frame(city.raster,xy=TRUE)
+city.df_full <- city.df_full[,1:2]
+names(city.df_full) <- c("X_COORD","Y_COORD")
+RegGrd.full <- city.df_full
+
+coordinates(city.df_full) <- c("X_COORD", "Y_COORD") 
+proj4string(city.df_full) <- prj
+BoundedOverFullGrd <- over(city.df_full, city.shp)
+isInCity <- !is.na(BoundedOverFullGrd$OBJECTID)
+RegGrd <- RegGrd.full[isInCity,]
+```
+
+```{r load-shapefiles, echo=FALSE, message=FALSE, warning=FALSE,cache=TRUE}
+Path.street_line <- paste0(Path.GIS,"Street_Center_Line")
+Path.major_street <- paste0(Path.GIS,"Major_Streets")
+Path.cpd_station <- paste0(Path.GIS,"police_stations_poly")
+Path.school <- paste0(Path.GIS,"School_Grounds")
+Path.park <- paste0(Path.GIS,"Parks_Aug2012")
+Path.hospital <- paste0(Path.GIS,"Hospitals")
+Path.library <- paste0(Path.GIS,"Libraries")
+Path.CTA_stop <-paste0(Path.GIS,"CTA_BusStops")
+Path.CTA_route <- paste0(Path.GIS,"CTA_Routes")
+Path.CTA_rail <- paste0(Path.GIS,"CTA_RailLines")
+Path.building <- paste0(Path.GIS,"Buildings")
+
+street_line.shp <- readOGR(Path.street_line,"Transportation")
+major_street.shp <- readOGR(Path.major_street,"Major_Streets")
+cpd_station.shp <- readOGR(Path.cpd_station,"police_stations")
+school.shp <- readOGR(Path.school,"School_Grounds")
+park.shp <- readOGR(Path.park,"Parks_Aug2012")
+hospital.shp <- readOGR(Path.hospital,"Hospitals")
+library.shp <- readOGR(Path.library,"Libraries")
+CTA_stop.shp <- readOGR(Path.CTA_stop,"CTA_BusStops")
+CTA_stop.shp <- spTransform(CTA_stop.shp, CRSobj=prj)
+CTA_route.shp <- readOGR(Path.CTA_route,"CTA_Routes")
+CTA_rail.shp <- readOGR(Path.CTA_rail,"CTA_RailLines")
+building.shp <- readOGR(Path.building,"Buildings")  # ~3 GB file!
+building.spdf <- building.shp
+building.spdf@data <- subset(building.spdf@data,select=c("BLDG_ID","BLDG_STATU","STORIES","NO_OF_UNIT","NO_STORIES",
+                                                         "NON_STANDA","YEAR_BUILT","BLDG_SQ_FO","BLDG_CONDI","VACANCY_ST",
+                                                         "X_COORD","Y_COORD","SHAPE_AREA","SHAPE_LEN"))
+# load("buildingShp.RData")
+
+# rename the attribute "NO_STORIES" as "UG_STORIES" (number of stories below ground) to make it less misleading
+names(building.spdf@data)[names(building.spdf@data)=="NO_STORIES"] <- "UG_STORIES"
+#remove "non-standard" building: 8500, CTAPLAT, MONUMNET, OTHER, keep only residential garage and NA's
+building.spdf <- subset(building.spdf, NON_STANDA=="RSGARAGE" | is.na(NON_STANDA))
+# remove 95 "proposed", 1 "demolished" and 1 "NA" in BLDG_STATU entries
+building.spdf <- subset(building.spdf,BLDG_STATU=="ACTIVE",select=-c(BLDG_STATU))
+#remove three entries where x,y coordinates are zeros
+building.spdf <- subset(building.spdf, X_COORD!=0 & Y_COORD!=0)
+```
+Compute time-invariant (Spatial) features:
+For each pixel, the spatial features are extracted from a region that is formed by extending the coordinate of the centroid of each pixel cell by 330 feet in both X and Y directions (roughly in line with the Chicago city block length (660 ft)). Note: the resolution of the binned crime images and the resolution of patches for extracting features do not have to be the same. Because both raw data are recorded on a extremely high resolution geospatial grid record. This enables us to calculate feature values without having to rasterize them into images of the same resolution of the binned crime images. 
+```{r spatial-features, echo=FALSE, message=FALSE, warning=FALSE,cache=TRUE}
+source("POIFunction.R")
+
+extension.x <- 330
+extension.y <- 330
+extension <- c(extension.x,extension.y)
+
+RegGrd <- StreetDen(RegGrd,street_line.shp,extension,Attr="StrDen",prj=prj)
+RegGrd <- Grd2POIdist(RegGrd,major_street.shp,"Dist2Street",prj=prj)
+RegGrd <- Grd2POIdist(RegGrd,cpd_station.shp,"Dist2CPDstation",prj=prj)
+RegGrd <- Grd2POIdist(RegGrd,school.shp,"Dist2School",prj=prj)
+RegGrd <- Grd2POIdist(RegGrd,park.shp,"Dist2Park",prj=prj)
+RegGrd <- Grd2POIdist(RegGrd,hospital.shp,"Dist2Hospital",prj=prj)
+RegGrd <- Grd2POIdist(RegGrd,library.shp,"Dist2Library",prj=prj)
+RegGrd <- Grd2POIdist(RegGrd,CTA_stop.shp,"Dist2BusStop",prj=prj)
+RegGrd <- Grd2POIdist(RegGrd,CTA_route.shp,"Dist2CTAroute",prj=prj)
+RegGrd <- Grd2POIdist(RegGrd,CTA_rail.shp,"Dist2CTArail",prj=prj)
+RegGrd <- BuildingDen(RegGrd,subset(building.spdf,is.na(NON_STANDA)),extension,Attr="BldgDen")
+RegGrd <- BuildingDen(RegGrd,subset(building.spdf,NON_STANDA=="RSGARAGE"),extension,Attr="GarageDen")
+RegGrd <- BuildingType(RegGrd,subset(building.spdf,is.na(NON_STANDA)),extension,Attr="AvgStories",
+                       BldgType="STORIES",fun=mean,na.rm=TRUE)
+RegGrd <- BuildingType(RegGrd,subset(building.spdf,is.na(NON_STANDA)),extension,Attr="AvgUnits",
+                       BldgType="NO_OF_UNIT",fun=mean,na.rm=TRUE)
+```
+Visualize feature maps
+```{r spatial-feature-maps, echo=FALSE, message=FALSE, warning=FALSE,fig.align='center',fig.width=10, fig.height=4.5, cache=TRUE}
+RegGrdRaster.StrDen <- rasterize(RegGrd[,c("X_COORD","Y_COORD")], r, RegGrd$StrDen, fun=sum)
+RegGrdRaster.Dist2Street <- rasterize(RegGrd[,c("X_COORD","Y_COORD")], r, RegGrd$Dist2Street, fun=sum)
+RegGrdRaster.Dist2CPDstation <- rasterize(RegGrd[,c("X_COORD","Y_COORD")], r, RegGrd$Dist2CPDstation, fun=sum)
+RegGrdRaster.Dist2School <- rasterize(RegGrd[,c("X_COORD","Y_COORD")], r, RegGrd$Dist2School, fun=sum)
+RegGrdRaster.Dist2Park <- rasterize(RegGrd[,c("X_COORD","Y_COORD")], r, RegGrd$Dist2Park, fun=sum)
+RegGrdRaster.Dist2Hospital <- rasterize(RegGrd[,c("X_COORD","Y_COORD")], r, RegGrd$Dist2Hospital, fun=sum)
+RegGrdRaster.Dist2Library <- rasterize(RegGrd[,c("X_COORD","Y_COORD")], r, RegGrd$Dist2Library, fun=sum)
+RegGrdRaster.Dist2BusStop <- rasterize(RegGrd[,c("X_COORD","Y_COORD")], r, RegGrd$Dist2BusStop, fun=sum)
+RegGrdRaster.Dist2CTAroute<- rasterize(RegGrd[,c("X_COORD","Y_COORD")], r, RegGrd$Dist2CTAroute, fun=sum)
+RegGrdRaster.Dist2CTArail <- rasterize(RegGrd[,c("X_COORD","Y_COORD")], r, RegGrd$Dist2CTArail, fun=sum)
+RegGrdRaster.BldgDen <- rasterize(RegGrd[,c("X_COORD","Y_COORD")], r, RegGrd$BldgDen, fun=sum)
+RegGrdRaster.GarageDen <- rasterize(RegGrd[,c("X_COORD","Y_COORD")], r, RegGrd$GarageDen, fun=sum)
+RegGrdRaster.AvgStories <- rasterize(RegGrd[,c("X_COORD","Y_COORD")], r, RegGrd$AvgStories, fun=sum)
+RegGrdRaster.AvgUnits <- rasterize(RegGrd[,c("X_COORD","Y_COORD")], r, RegGrd$AvgUnits, fun=sum)
+
+jet.colors <- colorRampPalette(c("#00007F", "blue", "#007FFF", "cyan", "#7FFF7F", "yellow", "#FF7F00", "red", "#7F0000"))
+par.default <- par()
+par(mfrow=c(1,2))
+plot(RegGrdRaster.StrDen,col=jet.colors(256), main="Nearby Street Density",cex.main=0.75,
+     panel.first=grid(grd.full@grid@cells.dim[2], grd.full@grid@cells.dim[1],col="lightgray", lty="dotted"))
+plot(RegGrdRaster.Dist2Street,col=jet.colors(256), main="Distance To Major Street",cex.main=0.75,
+     panel.first=grid(grd.full@grid@cells.dim[2], grd.full@grid@cells.dim[1],col="lightgray", lty="dotted"))
+plot(RegGrdRaster.Dist2CPDstation,col=jet.colors(256), main="Distance to Police Station",cex.main=0.75,
+     panel.first=grid(grd.full@grid@cells.dim[2], grd.full@grid@cells.dim[1],col="lightgray", lty="dotted"))
+plot(RegGrdRaster.Dist2School,col=jet.colors(256), main="Distance to School",cex.main=0.75,
+     panel.first=grid(grd.full@grid@cells.dim[2], grd.full@grid@cells.dim[1],col="lightgray", lty="dotted"))
+plot(RegGrdRaster.Dist2Park,col=jet.colors(256), main="Distance to Park",cex.main=0.75,
+     panel.first=grid(grd.full@grid@cells.dim[2], grd.full@grid@cells.dim[1],col="lightgray", lty="dotted"))
+plot(RegGrdRaster.Dist2Hospital,col=jet.colors(256), main="Distance to Hospital",cex.main=0.75,
+     panel.first=grid(grd.full@grid@cells.dim[2], grd.full@grid@cells.dim[1],col="lightgray", lty="dotted"))
+plot(RegGrdRaster.Dist2Library,col=jet.colors(256), main="Distance to Library",cex.main=0.75,
+     panel.first=grid(grd.full@grid@cells.dim[2], grd.full@grid@cells.dim[1],col="lightgray", lty="dotted"))
+plot(RegGrdRaster.Dist2BusStop,col=jet.colors(256), main="Distance to Bus Stop",cex.main=0.75,
+     panel.first=grid(grd.full@grid@cells.dim[2], grd.full@grid@cells.dim[1],col="lightgray", lty="dotted"))
+plot(RegGrdRaster.Dist2CTAroute,col=jet.colors(256), main="Distance to Bus route",cex.main=0.75,
+     panel.first=grid(grd.full@grid@cells.dim[2], grd.full@grid@cells.dim[1],col="lightgray", lty="dotted"))
+plot(RegGrdRaster.Dist2CTArail,col=jet.colors(256), main="Distance to CTA Train Rail",cex.main=0.75,
+     panel.first=grid(grd.full@grid@cells.dim[2], grd.full@grid@cells.dim[1],col="lightgray", lty="dotted"))
+plot(RegGrdRaster.BldgDen,col=jet.colors(256), main="Number of Nearby Buildings",cex.main=0.75,
+     panel.first=grid(grd.full@grid@cells.dim[2], grd.full@grid@cells.dim[1],col="lightgray", lty="dotted"))
+plot(RegGrdRaster.GarageDen,col=jet.colors(256), main="Number of Nearby Residential Garages",cex.main=0.75,
+     panel.first=grid(grd.full@grid@cells.dim[2], grd.full@grid@cells.dim[1],col="lightgray", lty="dotted"))
+plot(RegGrdRaster.AvgStories,col=jet.colors(256), main="Average Number of Nearby Building Stories",cex.main=0.75,
+     panel.first=grid(grd.full@grid@cells.dim[2], grd.full@grid@cells.dim[1],col="lightgray", lty="dotted"))
+plot(RegGrdRaster.AvgUnits,col=jet.colors(256), main="Average Number of Nearby Building Units",cex.main=0.75,
+     panel.first=grid(grd.full@grid@cells.dim[2], grd.full@grid@cells.dim[1],col="lightgray", lty="dotted"))
+```
+
+```{r train-test-partition, echo=FALSE, message=FALSE, warning=FALSE, cache=TRUE}
+startDate.train <- as.Date("2013-01-01")
+endDate.train <- as.Date("2013-12-31")
+dateSeq.train <- seq.Date(startDate.train,endDate.train,by=1)
+
+startDate.test <- as.Date("2014-01-01")
+endDate.test <- as.Date("2014-12-31")
+dateSeq.test <- seq.Date(startDate.test,endDate.test,by=1)
+```
+
+```{r load-weatherdata, echo=FALSE, message=FALSE, warning=FALSE, cache=TRUE}
+source("WeatherDataFunctions.R")
+WeatherFilePath <- "/Users/xiaomuliu/CrimeProject/SpatioTemporalModeling/ExploratoryAnalysis/WeatherData/"
+Weather.startDate="01/01/2001"
+Weather.endDate="12/31/2014"
+filename.daily <- paste(WeatherFilePath,'WeatherData_Daily_',as.character(as.Date(Weather.startDate, "%m/%d/%Y")),
+                        '_',as.character(as.Date(Weather.endDate, "%m/%d/%Y")),'.csv',sep='')
+WeatherData.daily <- read.csv(filename.daily)
+WeatherData.daily$Date <- as.Date(WeatherData.daily$Date)
+
+WeatherData.train <- subset(WeatherData.daily,Date>=startDate.train & Date<=endDate.train)
+WeatherData.test <- subset(WeatherData.daily,Date>=startDate.test & Date<=endDate.test)
+```
+The "near-repeat-effect" feature is calculated by doing a 3D convolution with the kernel specified below:
+$$ K(x,y,t) = \frac{1}{2\pi \sigma^2}\exp(-\frac{(x+y)^2}{2 \sigma^2}) \cdot \exp(-\lambda t)$$
+where $\sigma=2$ (2 grid cells of which the size is 637 ft $\times$ 576 ft), $\lambda=0.1$ in these experiments.
+```{r kernel-specifications, echo=FALSE, message=FALSE, warning=FALSE,cache=TRUE}
+# For the time dimesion, instead of using convolution, 
+# we can simplify the process by just performing the dot multiplication of *rev(kernel.t)* 
+# and the preceding *window.t* spatial smoothed data layers. 
+# Because only the last day will be used as the feature for the next day
+
+# Set up kernels
+window.x <- 5  # unit: raster cell size
+window.y <- 5
+window.t <- 14 # unit: day
+
+kernel.Xdim <- 5
+kernel.Ydim <- 5
+kernel.Tdim <- 14
+
+kernel.Xgrd <- seq(-window.x,window.x,length.out=kernel.Xdim)
+kernel.Ygrd <- seq(-window.y,window.y,length.out=kernel.Ydim)
+kernel.Tgrd <- seq(0,window.t,length.out=kernel.Tdim)
+
+sigma <- 2
+lambda <- 0.1
+kernel.x <- 1/(sqrt(2*pi)*sigma)*exp(-kernel.Xgrd^2/(2*sigma^2))
+kernel.y <- 1/(sqrt(2*pi)*sigma)*exp(-kernel.Ygrd^2/(2*sigma^2))
+kernel.t <- exp(-lambda*kernel.Tgrd)
+```
+
+```{r load-crimedata, echo=FALSE, message=FALSE, warning=FALSE, cache=TRUE}
+load("MatchedBurglaryData_portal.RData")
+
+# Add *window.t* days as the buffer so that the kernel smoothed feature would be able to comupted 
+BurglaryData.train <- subset(BurglaryData,DATEOCC>=startDate.train-window.t & DATEOCC<=endDate.train)
+BurglaryData.test <- subset(BurglaryData,DATEOCC>=startDate.test-window.t & DATEOCC<=endDate.test)
+```
+
+The features are consisted of the following: 1. time-related, 2. weather, 3. space-related 4. historic burglary rate. The temporal and weather features are not spatially varying. So for each feature, we uniformly assign each pixel the same value throughout the entire city accordingly.
+
+Since we rasterized the point data to a dense grid, we get one incident in a bin most of the times. However, occasionally there are two or more incidents happening within a bin at our resolution. So we did two experiments: categorizing our target class into three classes where 0 indicates no incident, 1 indicates one incident, 2 indicates two or more incidents; categorizing the target class into two classes where 0 indicates no incident, 1 indicates incident present.
+
+```{r prepare-train-data, echo=FALSE, message=FALSE, warning=FALSE, cache=TRUE}
+source("ConvFunction.R")
+
+VarName.time <- c("DAY","MONTH","YEAR","DOW","HOLIDAY")
+VarName.weather <- names(subset(WeatherData.train,select=-Date))
+VarName.space <- c("StrDen","Dist2Street","Dist2CPDstation","Dist2School","Dist2Park","Dist2Hospital",
+                   "Dist2Library","Dist2BusStop","Dist2CTAroute","Dist2CTArail","BldgDen","GarageDen","AvgStories","AvgUnits")
+VarName.crime <- c("NearbyEffect","LongtermEffect")
+VarName <- c(VarName.time,VarName.weather,VarName.space,VarName.crime)
+period.long <- 365
+Ngrids <- nrow(RegGrd) 
+Ndays.train <- length(dateSeq.train)
+FeatureVec.train <- matrix(NA,nrow=Ndays.train*Ngrids,ncol=length(VarName))
+FeatureVec.train <- as.data.frame(FeatureVec.train)
+names(FeatureVec.train) <- VarName
+Label3c.train <- rep(0,nrow(FeatureVec.train))
+
+FeatureVec.train$DOW <- factor(FeatureVec.train$DOW, levels=c("Sun","Mon","Tue","Wed","Thu","Fri","Sat"))
+FeatureVec.train$HOLIDAY <- factor(FeatureVec.train$HOLIDAY,levels=levels(BurglaryData$HOLIDAY))
+FeatureVec.train$MONTH <- factor(FeatureVec.train$MONTH,levels=1:12)
+
+for (i in 1:Ndays.train){
+  d <- dateSeq.train[i]
+  
+  # Temporal variables
+  BurglaryData.time <- subset(BurglaryData.train, DATEOCC==d,select=VarName.time)
+  FeatureVec.train[((i-1)*Ngrids+1):(i*Ngrids),VarName.time] <- BurglaryData.time[rep(1,Ngrids),]
+  
+  # Weather variables
+  WeatherData.day <- subset(WeatherData.train,Date==d,select=-Date)
+  FeatureVec.train[((i-1)*Ngrids+1):(i*Ngrids),VarName.weather] <- WeatherData.day[rep(1,Ngrids),]
+  
+  # Spatial variables
+  FeatureVec.train[((i-1)*Ngrids+1):(i*Ngrids),VarName.space] <- RegGrd[,VarName.space] 
+  
+  # Kernel-smoothed-neighboring-incident variable
+  KS <- KernSmNearbyCrime(BurglaryData.train,d,RegGrd.full,r,window.t,kernel.x,kernel.y,kernel.t,isInCity,prj)
+  BurglaryHistPts.long <- subset(BurglaryData,DATEOCC>=d-period.long & DATEOCC<=d-1,select=c("X_COORD","Y_COORD","INC_CNT"))  
+  KDE.long <- SpatialKernSmCrime(BurglaryHistPts.long,RegGrd.full,r,kernel.x,kernel.y,isInCity,prj)
+  FeatureVec.train[((i-1)*Ngrids+1):(i*Ngrids),VarName.crime] <- cbind(KS$KernSm.df_inPoly$KS_VAL, KDE.long$KernSm.df_inPoly$KS_VAL)
+  
+  # assign labels according to the burglary counts
+  BurglaryData.day <- subset(BurglaryData.train, DATEOCC==d, select=c("X_COORD","Y_COORD","INC_CNT"))
+  BurglaryRaster <- rasterize(BurglaryData.day[,c("X_COORD","Y_COORD")], r, BurglaryData.day$INC_CNT, fun=sum)
+  BurglaryRaster.df_inCity <- as.data.frame(BurglaryRaster)[isInCity,]
+  BurglaryRaster.df_inCity[is.na(BurglaryRaster.df_inCity)] <- 0
+  
+  idx.lv1 <- BurglaryRaster.df_inCity==1
+  idx.lv2 <- BurglaryRaster.df_inCity>1
+  level <- rep(0,Ngrids)
+  level[idx.lv1] <- 1
+  level[idx.lv2] <- 2
+  Label3c.train[((i-1)*Ngrids+1):(i*Ngrids)] <- level
+}
+Label3c.train <- as.factor(Label3c.train)
+# Two-class case
+Label2c.train <- as.factor(as.numeric(Label3c.train!=0))
+```
+
+```{r prepare-test-data, echo=FALSE, message=FALSE, warning=FALSE, cache=TRUE}
+Ndays.test <- length(dateSeq.test)
+FeatureVec.test <- matrix(NA,nrow=Ndays.test*Ngrids,ncol=length(VarName))
+FeatureVec.test <- as.data.frame(FeatureVec.test)
+names(FeatureVec.test) <- VarName
+Label3c.test <- rep(0,nrow(FeatureVec.test))
+
+FeatureVec.test$DOW <- factor(FeatureVec.test$DOW, levels=c("Sun","Mon","Tue","Wed","Thu","Fri","Sat"))
+FeatureVec.test$HOLIDAY <- factor(FeatureVec.test$HOLIDAY,levels=levels(BurglaryData$HOLIDAY))
+FeatureVec.test$MONTH <- factor(FeatureVec.test$MONTH,levels=1:12)
+
+for (i in 1:Ndays.test){
+  d <- dateSeq.test[i]
+  
+  # Temporal variables
+  BurglaryData.time <- subset(BurglaryData.test, DATEOCC==d,select=VarName.time)
+  FeatureVec.test[((i-1)*Ngrids+1):(i*Ngrids),VarName.time] <- BurglaryData.time[rep(1,Ngrids),]
+  
+  # Weather variables
+  WeatherData.day <- subset(WeatherData.test,Date==d,select=-Date)
+  FeatureVec.test[((i-1)*Ngrids+1):(i*Ngrids),VarName.weather] <- WeatherData.day[rep(1,Ngrids),]
+  
+  # Spatial variables
+  FeatureVec.test[((i-1)*Ngrids+1):(i*Ngrids),VarName.space] <- RegGrd[,VarName.space] 
+  
+  # Kernel-smoothed-neighboring-incident variable
+  KS <- KernSmNearbyCrime(BurglaryData.test,d,RegGrd.full,r,window.t,kernel.x,kernel.y,kernel.t,isInCity,prj)
+  BurglaryHistPts.long <- subset(BurglaryData,DATEOCC>=d-period.long & DATEOCC<=d-1,select=c("X_COORD","Y_COORD","INC_CNT"))  
+  KDE.long <- SpatialKernSmCrime(BurglaryHistPts.long,RegGrd.full,r,kernel.x,kernel.y,isInCity,prj) 
+  FeatureVec.test[((i-1)*Ngrids+1):(i*Ngrids),VarName.crime] <- cbind(KS$KernSm.df_inPoly$KS_VAL, KDE.long$KernSm.df_inPoly$KS_VAL)
+  
+  # assign labels according to the burglary counts
+  BurglaryData.day <- subset(BurglaryData.test, DATEOCC==d, select=c("X_COORD","Y_COORD","INC_CNT"))
+  BurglaryRaster <- rasterize(BurglaryData.day[,c("X_COORD","Y_COORD")], r, BurglaryData.day$INC_CNT, fun=sum)
+  BurglaryRaster.df_inCity <- as.data.frame(BurglaryRaster)[isInCity,]
+  BurglaryRaster.df_inCity[is.na(BurglaryRaster.df_inCity)] <- 0
+  
+  idx.lv1 <- BurglaryRaster.df_inCity==1
+  idx.lv2 <- BurglaryRaster.df_inCity>1
+  level <- rep(0,Ngrids)
+  level[idx.lv1] <- 1
+  level[idx.lv2] <- 2
+  Label3c.test[((i-1)*Ngrids+1):(i*Ngrids)] <- level
+}
+Label3c.test <- as.factor(Label3c.test)
+# Two-class case
+Label2c.test <- as.factor(as.numeric(Label3c.test!=0))
+```
+
+Using one year training data (data of year 2014 here), we do univariate aanalysis for each feature to see its separability for the classification problem. 
+1. The temporal features are not location-depended, so we use box plots to see the city wide incident counts varying by time.
+2. The spatial and near-repeat effect features are presented as histograms for each class. Also their corresponding smoothed density curves are shown below the histograms.
+
+```{r univariate-analysis, echo=FALSE, message=FALSE, warning=FALSE, fig.align='center',fig.width=10, fig.height=4.5, cache=TRUE}
+library(lattice)
+
+BurglaryData.train2 <- subset(BurglaryData,DATEOCC>=startDate.train & DATEOCC<=endDate.train)
+BurglaryData.daily <- aggregate(INC_CNT~DATEOCC+YEAR+MONTH+DOW+HOLIDAY,data=BurglaryData.train2, FUN=sum, na.rm=TRUE)
+BurglaryData.daily <- BurglaryData.daily[order(BurglaryData.daily$DATEOCC),]
+BurglaryData.daily$DOW <- factor(BurglaryData.daily$DOW, levels=c("Sun","Mon","Tue","Wed","Thu","Fri","Sat"))
+BurglaryData.daily$HOLIDAY <- factor(BurglaryData.daily$HOLIDAY, levels=levels(BurglaryData$HOLIDAY))
+BurglaryData.daily$MONTH <- factor(BurglaryData.daily$MONTH)
+
+par(mfrow=c(1,3))
+boxplot(INC_CNT~MONTH,BurglaryData.daily,xaxt="n",ylab="Burglary Count",
+        main="City-wide daily burglary incidents by month",cex.main=0.8)
+axis(side=1,at=1:12, labels=c("Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"),las=1,cex.axis=1)
+boxplot(INC_CNT~DOW,BurglaryData.daily,ylab="Burglary Count",
+        main="City-wide daily burglary incidents by day of week",cex.main=0.8)
+boxplot(INC_CNT~HOLIDAY,BurglaryData.daily,ylab="Burglary Count",
+        main="City-wide daily burglary incidents by holiday",cex.main=0.8)
+
+TrainData <- cbind(subset(FeatureVec.train,select=-c(DAY,YEAR)),Label3c.train,Label2c.train)
+
+for(j in 1:length(VarName.space)){
+  f <- histogram(as.formula(paste0("~",VarName.space[j],"|Label3c.train")), data=TrainData,type="density",breaks=50)
+  print(f)
+}
+
+f <- histogram(as.formula(paste0("~",VarName.crime,"|Label3c.train")), data=TrainData,type="density",breaks=50)
+print(f)
+
+
+for(j in 1:length(VarName.space)){
+  f <- densityplot(as.formula(paste0("~",VarName.space[j])), data=TrainData, groups=Label3c.train,
+                   par.settings = list(superpose.symbol=list(pch=16,cex=1,col=c("blue","green","red")),
+                                       superpose.line = list(col=c("blue","green","red"))),                                                                                                                                                   
+                   plot.points=FALSE, ref=TRUE, 
+                   auto.key=list(col=c("blue","green","red"),lwd=2,space="top",columns=3))
+
+  if (j %% 2 ==1){
+    print(f, position=c(0, 0, 0.4, 1), more=TRUE)
+    }
+  else{
+    print(f, position=c(0.6, 0, 1, 1))
+    }
+}
+
+
+f <- densityplot(as.formula(paste0("~",VarName.crime)), data=TrainData, groups=Label3c.train,
+                 par.settings = list(superpose.symbol=list(pch=16,cex=1,col=c("blue","green","red")),
+                                     superpose.line = list(col=c("blue","green","red"))),                                                                                                                                                   
+                 plot.points=FALSE, ref=TRUE, 
+                 auto.key=list(col=c("blue","green","red"),lwd=2,space="top",columns=3))
+if (length(VarName.space) %% 2==1){
+  print(f,position=c(0.6,0,1,1))
+}else{
+  print(f, position=c(0, 0, 0.4, 1))
+}
+  
+```
+
+```{r scale-features, echo=FALSE, message=FALSE, warning=FALSE, cache=TRUE}
+minmaxScale <- function(x,center=min(x),scale=max(x)-min(x)){
+  x <- (x-center)/scale
+  return(x)
+}
+
+ctr <- apply(FeatureVec.train[,c(VarName.weather,VarName.space,VarName.crime)],2,min)
+sc <- apply(FeatureVec.train[,c(VarName.weather,VarName.space,VarName.crime)],2,max) - apply(FeatureVec.train[,c(VarName.weather,VarName.space,VarName.crime)],2,min)
+
+FeatureVec.train_scale <- cbind(FeatureVec.train[,VarName.time],apply(FeatureVec.train[,c(VarName.weather,VarName.space,VarName.crime)],2,minmaxScale))
+TrainData <- cbind(subset(FeatureVec.train_scale,select=-c(DAY,YEAR)),Label3c.train,Label2c.train)
+
+FeatureVec.test_scale <- cbind(FeatureVec.test[,VarName.time],scale(FeatureVec.test[,c(VarName.weather,VarName.space,VarName.crime)],center=ctr,scale=sc))
+# FeatureVec.test_scale <- cbind(FeatureVec.test[,VarName.time],apply(FeatureVec.test[,c(VarName.weather,VarName.space,VarName.crime)],2,minmaxScale))
+TestData <- cbind(subset(FeatureVec.test_scale,select=-c(DAY,YEAR)),Label3c.test,Label2c.test)
+```
+
+The original training data set is of all pixels of feature maps of year 2013 which means we have 17472 $\times$ 365 = 6377280 instance in total. Among them, only 17370 (0.2%) have non-zero class labels. So we have to down-sample the zero class instances to deal with the imbalanced data problem. Here we simple apply the random down sampling to let the size of the zero class to be roughly equal to that of the nonzero ones.   
+The test data is all pixel maps of year 2014.
+
+```{r three-category-data, echo=FALSE, message=FALSE, warning=FALSE, cache=TRUE}
+# Subset Training Data by randomly down-sampling class 0 instances
+Class0.train <- subset(subset(TrainData,select=-c(Label2c.train)),Label3c.train==0)
+Class1.train <- subset(subset(TrainData,select=-c(Label2c.train)),Label3c.train==1)
+Class2.train <- subset(subset(TrainData,select=-c(Label2c.train)),Label3c.train==2)
+SubSample <- sample(1:nrow(Class0.train),size=nrow(Class1.train)+nrow(Class2.train))
+Class0.train_sub <- Class0.train[SubSample,]
+TrainData.sub <- rbind(Class0.train_sub,Class1.train,Class2.train)
+
+Class0.test <- subset(subset(TestData,select=-c(Label2c.test)),Label3c.test==0)
+Class1.test  <- subset(subset(TestData,select=-c(Label2c.test)),Label3c.test==1)
+Class2.test  <- subset(subset(TestData,select=-c(Label2c.test)),Label3c.test==2)
+TestData.sub <- rbind(Class0.test,Class1.test,Class2.test) 
+```
+
+Three-category case
+LDA
+```{r LDA-3c, echo=FALSE, message=FALSE, warning=FALSE, cache=TRUE}
+library(MASS)
+Model.lda <- lda(Label3c.train~.,data=TrainData.sub)
+Pred.train_lda <- predict(Model.lda,TrainData.sub)
+Pred.test_lda <- predict(Model.lda,TestData.sub)
+# Confusion matrix
+contTable.train_lda <- table(TrainData.sub$Label3c.train, Pred.train_lda$class, dnn=c("Actual Label","Predicted Label"))
+contTable.test_lda <- table(TestData.sub$Label3c.test, Pred.test_lda$class, dnn=c("Actual Label","Predicted Label"))
+sprintf("Confusion Matrix (LDA: Training)")
+print(contTable.train_lda)
+sprintf("Confusion Matrix (LDA: Testing)")
+print(contTable.test_lda)
+```
+multinomial logistic regession
+```{r multinomial-logistic-regession-3c, echo=FALSE, message=FALSE, warning=FALSE, cache=TRUE}
+library(nnet)
+Model.logit <- multinom(Label3c.train~.,data=TrainData.sub,trace=FALSE)
+Pred.train_logit <- predict(Model.logit,TrainData.sub,type="class")
+Pred.test_logit <- predict(Model.logit,TestData.sub,type="class")
+contTable.train_logit <- table(TrainData.sub$Label3c.train,Pred.train_logit,dnn=c("Actual Label","Predicted Label"))
+contTable.test_logit <- table(TestData.sub$Label3c.test,Pred.test_logit,dnn=c("Actual Label","Predicted Label"))
+sprintf("Confusion Matrix (Multinomial Logistic Regression: Training)")
+print(contTable.train_logit)
+sprintf("Confusion Matrix (Multinomial Logistic Regression: Testing)")
+print(contTable.test_logit)
+
+# library(VGAM)
+# Model.logit2 <- vglm(Label~., family=multinomial(refLevel=1), data=TrainData.sub)
+# Pred.logit2 <- predict(Model.logit2,TrainData,type="response")
+# contTable.logit2 <- table(TrainData$Label,max.col(Pred.logit2)-1,dnn=c("Actual Label","Predicted Label"))
+```
+
+Two-category case
+```{r two-category-data, echo=FALSE, message=FALSE, warning=FALSE, cache=TRUE}
+Class0.train <- subset(subset(TrainData,select=-c(Label3c.train)),Label2c.train==0)
+Class1.train <- subset(subset(TrainData,select=-c(Label3c.train)),Label2c.train==1)
+SubSample <- sample(1:nrow(Class0.train),size=nrow(Class1.train))
+Class0.train_sub <- Class0.train[SubSample,]
+TrainData.sub <- rbind(Class0.train_sub,Class1.train) 
+
+Class0.test <- subset(subset(TestData,select=-c(Label3c.test)),Label2c.test==0)
+Class1.test <- subset(subset(TestData,select=-c(Label3c.test)),Label2c.test==1)
+TestData.sub <- rbind(Class0.test,Class1.test) 
+```
+The continuous features are scaled to [0,1] as feature set is mixed with categorical and continuous variables. The test set is scaled according to the scaling parameters of the training set. Because the features are on the same scaling and the models are linear, we can compare the coefficients to see how important these features are.
+
+LDA
+```{r LDA-2c, echo=FALSE, message=FALSE, warning=FALSE, cache=TRUE}
+Model.lda <- lda(Label2c.train~.,data=TrainData.sub)
+Pred.train_lda <- predict(Model.lda,TrainData.sub)
+Pred.test_lda <- predict(Model.lda,TestData.sub)
+# Confusion matrix
+contTable.train_lda <- table(TrainData.sub$Label2c.train, Pred.train_lda$class, dnn=c("Actual Label","Predicted Label"))
+contTable.test_lda <- table(TestData.sub$Label2c.test, Pred.test_lda$class, dnn=c("Actual Label","Predicted Label"))
+sprintf("Confusion Matrix (LDA: Training)")
+print(contTable.train_lda)
+sprintf("Confusion Matrix (LDA: Testing)")
+print(contTable.test_lda)
+# coefficients of each variable
+print(Model.lda$scaling)
+```
+
+Logistic Regression
+```{r binomial-logistic-regession-2c, echo=FALSE, message=FALSE, warning=FALSE, cache=TRUE}
+Model.logit <- glm(Label2c.train~.,family=binomial(link="logit"), data=TrainData.sub)
+Pred.train_logit <- predict(Model.logit,TrainData.sub,type="response")
+Pred.test_logit <- predict(Model.logit,TestData.sub,type="response")
+
+PredClass.train_logit <- ifelse(Pred.train_logit>=0.5, 1, 0)
+PredClass.test_logit <- ifelse(Pred.test_logit>=0.5, 1, 0) 
+contTable.train_logit <- table(TrainData.sub$Label2c.train,PredClass.train_logit,dnn=c("Actual Label","Predicted Label"))
+contTable.test_logit <- table(TestData.sub$Label2c.test,PredClass.test_logit,dnn=c("Actual Label","Predicted Label"))
+sprintf("Confusion Matrix (Binomial Logistic Regression: Training)")
+print(contTable.train_logit)
+sprintf("Confusion Matrix (Binomial Logistic Regression: Testing)")
+print(contTable.test_logit)
+# coefficients of each variable
+summary(Model.logit)$coefficients
+```
+
+We compare our models with the hot-spot methods which are consisted of a long-term (preceding 365 days) density and two short-term (preceding 7 days and 14 days) density models. The incident points were first rasterized as pixel maps with the same resolution of the classification feature maps. Then the spatial Guassian kernel of form $K(x,y) = \frac{1}{2\pi\sigma^2}\exp(-\frac{(x+y)^2}{2 \sigma^2})$ was applied with $\sigma=2$ consistent with the one used in creating the near-repeat effect feature. The pixels were further scaled to [0,1] so that they are assumed to be the probability predictions therefore ROC curves can be generated. 
+
+```{r hot-spot-train-2c, echo=FALSE, message=FALSE, warning=FALSE, cache=TRUE}
+period.long <- 365
+period.short1 <- 7
+period.short2 <- 14
+
+HotSpot.train <- data.frame(Long=rep(0,Ngrids*Ndays.train),Short1=rep(0,Ngrids*Ndays.train),Short2=rep(0,Ngrids*Ndays.train),Label3c.train,Label2c.train)
+
+for (i in 1:Ndays.train){
+  d <- dateSeq.train[i]
+  
+  BurglaryHistPts.long <- subset(BurglaryData,DATEOCC>=d-period.long & DATEOCC<=d-1,select=c("X_COORD","Y_COORD","INC_CNT"))
+  BurglaryHistPts.short1 <- subset(BurglaryData,DATEOCC>=d-period.short1 & DATEOCC<=d-1,select=c("X_COORD","Y_COORD","INC_CNT"))
+  BurglaryHistPts.short2 <- subset(BurglaryData,DATEOCC>=d-period.short2 & DATEOCC<=d-1,select=c("X_COORD","Y_COORD","INC_CNT"))
+  
+  KDE.long <- SpatialKernSmCrime(BurglaryHistPts.long,RegGrd.full,r,kernel.x,kernel.y,isInCity,prj)
+  KDE.long_df_inCity <- KDE.long$KernSm.df_inPoly
+  # scale to probability values ([0,1]) for each pixel
+  KDE.long_df_inCity$KS_VAL <- minmaxScale(KDE.long_df_inCity$KS_VAL) 
+ 
+  KDE.short1 <- SpatialKernSmCrime(BurglaryHistPts.short1,RegGrd.full,r,kernel.x,kernel.y,isInCity,prj)
+  KDE.short1_df_inCity <- KDE.short1$KernSm.df_inPoly
+  # scale to probability values ([0,1]) for each pixel
+  KDE.short1_df_inCity$KS_VAL <- minmaxScale(KDE.short1_df_inCity$KS_VAL) 
+  
+  KDE.short2 <- SpatialKernSmCrime(BurglaryHistPts.short2,RegGrd.full,r,kernel.x,kernel.y,isInCity,prj)
+  KDE.short2_df_inCity <- KDE.short2$KernSm.df_inPoly
+  # scale to probability values ([0,1]) for each pixel
+  KDE.short2_df_inCity$KS_VAL <- minmaxScale(KDE.short2_df_inCity$KS_VAL) 
+  
+  HotSpot.train$Long[((i-1)*Ngrids+1):(i*Ngrids)] <- KDE.long_df_inCity$KS_VAL
+  HotSpot.train$Short1[((i-1)*Ngrids+1):(i*Ngrids)] <- KDE.short1_df_inCity$KS_VAL
+  HotSpot.train$Short2[((i-1)*Ngrids+1):(i*Ngrids)] <- KDE.short2_df_inCity$KS_VAL
+}  
+
+HS.train_class0 <- subset(subset(HotSpot.train,select=-c(Label3c.train)),Label2c.train==0)
+HS.train_class1 <- subset(subset(HotSpot.train,select=-c(Label3c.train)),Label2c.train==1)
+HS.train_class0_sub <- HS.train_class0[SubSample,]
+HS.train_sub <- rbind(HS.train_class0_sub,HS.train_class1)
+```
+
+```{r hot-spot-test-2c, echo=FALSE, message=FALSE, warning=FALSE, cache=TRUE}
+HotSpot.test <- data.frame(Long=rep(0,Ngrids*Ndays.test),Short1=rep(0,Ngrids*Ndays.test),Short2=rep(0,Ngrids*Ndays.test),Label3c.test,Label2c.test)
+
+for (i in 1:Ndays.test){
+  d <- dateSeq.train[i]
+  
+  BurglaryHistPts.long <- subset(BurglaryData,DATEOCC>=d-period.long & DATEOCC<=d-1,select=c("X_COORD","Y_COORD","INC_CNT"))
+  BurglaryHistPts.short1 <- subset(BurglaryData,DATEOCC>=d-period.short1 & DATEOCC<=d-1,select=c("X_COORD","Y_COORD","INC_CNT"))
+  BurglaryHistPts.short2 <- subset(BurglaryData,DATEOCC>=d-period.short2 & DATEOCC<=d-1,select=c("X_COORD","Y_COORD","INC_CNT"))
+  
+  KDE.long <- SpatialKernSmCrime(BurglaryHistPts.long,RegGrd.full,r,kernel.x,kernel.y,isInCity,prj)
+  KDE.long_df_inCity <- KDE.long$KernSm.df_inPoly
+  # scale to probability values ([0,1]) for each pixel
+  KDE.long_df_inCity$KS_VAL <- minmaxScale(KDE.long_df_inCity$KS_VAL) 
+ 
+  KDE.short1 <- SpatialKernSmCrime(BurglaryHistPts.short1,RegGrd.full,r,kernel.x,kernel.y,isInCity,prj)
+  KDE.short1_df_inCity <- KDE.short1$KernSm.df_inPoly
+  # scale to probability values ([0,1]) for each pixel
+  KDE.short1_df_inCity$KS_VAL <- minmaxScale(KDE.short1_df_inCity$KS_VAL) 
+  
+  KDE.short2 <- SpatialKernSmCrime(BurglaryHistPts.short2,RegGrd.full,r,kernel.x,kernel.y,isInCity,prj)
+  KDE.short2_df_inCity <- KDE.short2$KernSm.df_inPoly
+  # scale to probability values ([0,1]) for each pixel
+  KDE.short2_df_inCity$KS_VAL <- minmaxScale(KDE.short2_df_inCity$KS_VAL) 
+  
+  HotSpot.test$Long[((i-1)*Ngrids+1):(i*Ngrids)] <- KDE.long_df_inCity$KS_VAL
+  HotSpot.test$Short1[((i-1)*Ngrids+1):(i*Ngrids)] <- KDE.short1_df_inCity$KS_VAL
+  HotSpot.test$Short2[((i-1)*Ngrids+1):(i*Ngrids)] <- KDE.short2_df_inCity$KS_VAL
+}  
+
+HS.test_class0 <- subset(subset(HotSpot.test,select=-c(Label3c.test)),Label2c.test==0)
+HS.test_class1 <- subset(subset(HotSpot.test,select=-c(Label3c.test)),Label2c.test==1)
+HS.test <- rbind(HS.test_class0,HS.test_class1)
+```
+
+The training ROC curve
+```{r train-ROC, echo=FALSE, message=FALSE, warning=FALSE, fig.align='center',fig.width=6.5, fig.height=5.5, cache=TRUE}
+library(ROCR)
+# calculating the values for ROC curve
+rocVal.train_lda <- prediction(Pred.train_lda$posterior[,2], TrainData.sub$Label2c.train)
+perf.train_lda <- performance(rocVal.train_lda, measure="tpr", x.measure="fpr")
+auc.train_lda <- performance(rocVal.train_lda,"auc")
+auc.train_lda <- unlist(slot(auc.train_lda, "y.values")) # convert S4 class to vector
+
+rocVal.train_logit <- prediction(Pred.train_logit, TrainData.sub$Label2c.train)
+perf.train_logit <- performance(rocVal.train_logit, measure="tpr", x.measure="fpr")
+auc.train_logit <- performance(rocVal.train_logit,"auc")
+auc.train_logit <- unlist(slot(auc.train_logit, "y.values")) # convert S4 class to vector
+
+rocVal.train_hs_long <- prediction(HS.train_sub$Long, TrainData.sub$Label2c.train)
+perf.train_hs_long <- performance(rocVal.train_hs_long, measure="tpr", x.measure="fpr")
+auc.train_hs_long <- performance(rocVal.train_hs_long,"auc")
+auc.train_hs_long <- unlist(slot(auc.train_hs_long, "y.values")) # convert S4 class to vector
+
+rocVal.train_hs_short1 <- prediction(HS.train_sub$Short1, TrainData.sub$Label2c.train)
+perf.train_hs_short1 <- performance(rocVal.train_hs_short1, measure="tpr", x.measure="fpr")
+auc.train_hs_short1 <- performance(rocVal.train_hs_short1,"auc")
+auc.train_hs_short1 <- unlist(slot(auc.train_hs_short1, "y.values")) # convert S4 class to vector
+
+rocVal.train_hs_short2 <- prediction(HS.train_sub$Short2, TrainData.sub$Label2c.train)
+perf.train_hs_short2 <- performance(rocVal.train_hs_short2, measure="tpr", x.measure="fpr")
+auc.train_hs_short2 <- performance(rocVal.train_hs_short2,"auc")
+auc.train_hs_short2 <- unlist(slot(auc.train_hs_short2, "y.values")) # convert S4 class to vector
+
+par(mar=c(5,5,5,5),xaxs="i",yaxs="i",cex.axis=1,cex.lab=1)
+plot(perf.train_lda,col="red",lty=3, lwd=3)
+plot(perf.train_logit,col="green",lty=1, lwd=2,add=TRUE)
+plot(perf.train_hs_long,col="blue",lty=1, lwd=2,add=TRUE)
+plot(perf.train_hs_short1,col="yellow",lty=1, lwd=2,add=TRUE)
+plot(perf.train_hs_short2,col="magenta",lty=1, lwd=2,add=TRUE)
+mtext("ROC",side=3,cex=1,outer=TRUE)
+# par(fig=c(0,1,0,1), oma=c(0,0,0,0), mar=c(0,0,0,0), new=TRUE)
+par(new=TRUE)
+plot(0, 0, type="n", bty="n", xaxt="n", yaxt="n",xlab="",ylab="")
+legend("right",legend=c("LDA","logistic regression",paste0("long-term (", period.long,"-day) density"),paste0("short-term (", period.short1,"-day) density"),paste0("short-term (", period.short2,"-day) density")),col=c("red","green","blue","yellow","magenta"),lty=1, lwd=2,cex=0.8,inset = c(0,0),xpd=TRUE)
+```
+
+The testing ROC curve
+```{r test-ROC, echo=FALSE, message=FALSE, warning=FALSE, fig.align='center',fig.width=6.5, fig.height=5.5, cache=TRUE}
+rocVal.test_lda <- prediction(Pred.test_lda$posterior[,2], TestData.sub$Label2c.test)
+perf.test_lda <- performance(rocVal.test_lda, measure="tpr", x.measure="fpr")
+auc.test_lda <- performance(rocVal.test_lda,"auc")
+auc.test_lda <- unlist(slot(auc.test_lda, "y.values")) # convert S4 class to vector
+
+rocVal.test_logit <- prediction(Pred.test_logit, TestData.sub$Label2c.test)
+perf.test_logit <- performance(rocVal.test_logit, measure="tpr", x.measure="fpr")
+auc.test_logit <- performance(rocVal.test_logit,"auc")
+auc.test_logit <- unlist(slot(auc.test_logit, "y.values")) # convert S4 class to vector
+
+rocVal.test_hs_long <- prediction(HS.test$Long, TestData.sub$Label2c.test)
+perf.test_hs_long <- performance(rocVal.test_hs_long, measure="tpr", x.measure="fpr")
+auc.test_hs_long <- performance(rocVal.test_hs_long,"auc")
+auc.test_hs_long <- unlist(slot(auc.test_hs_long, "y.values")) # convert S4 class to vector
+
+rocVal.test_hs_short1 <- prediction(HS.test$Short1, TestData.sub$Label2c.test)
+perf.test_hs_short1 <- performance(rocVal.test_hs_short1, measure="tpr", x.measure="fpr")
+auc.test_hs_short1 <- performance(rocVal.test_hs_short1,"auc")
+auc.test_hs_short1 <- unlist(slot(auc.test_hs_short1, "y.values")) # convert S4 class to vector
+
+rocVal.test_hs_short2 <- prediction(HS.test$Short2, TestData.sub$Label2c.test)
+perf.test_hs_short2 <- performance(rocVal.test_hs_short2, measure="tpr", x.measure="fpr")
+auc.test_hs_short2 <- performance(rocVal.test_hs_short2,"auc")
+auc.test_hs_short2 <- unlist(slot(auc.test_hs_short2, "y.values")) # convert S4 class to vector
+
+par(mar=c(5,5,5,5),xaxs="i",yaxs="i",cex.axis=1,cex.lab=1)
+plot(perf.test_lda,col="red",lty=1, lwd=2)
+plot(perf.test_logit,col="green",lty=1, lwd=2,add=TRUE)
+plot(perf.test_hs_long,col="blue",lty=1, lwd=2,add=TRUE)
+plot(perf.test_hs_short1,col="yellow",lty=1, lwd=2,add=TRUE)
+plot(perf.test_hs_short2,col="magenta",lty=1, lwd=2,add=TRUE)
+mtext("ROC",side=3,cex=1,outer=TRUE)
+# par(fig=c(0,1,0,1), oma=c(0,0,0,0), mar=c(0,0,0,0), new=TRUE)
+par(new=TRUE)
+plot(0, 0, type="n", bty="n", xaxt="n", yaxt="n",xlab="",ylab="")
+legend("right",legend=c("LDA","logistic regression",paste0("long-term (", period.long,"-day) density"),paste0("short-term (", period.short1,"-day) density"),paste0("short-term (", period.short2,"-day) density")),col=c("red","green","blue","yellow","magenta"),lty=1, lwd=2,cex=0.8,inset = c(0,0),xpd=TRUE)
+```
+
+```{r AUC, echo=FALSE, message=FALSE, warning=FALSE, cache=TRUE}
+library(knitr)
+AUC <- data.frame(Model = c("LDA","Logistic Regression","Long-term Density","Short-term Density 1","Short-term Density 2"),
+                        Training = c(auc.train_lda,auc.train_logit,auc.train_hs_long,auc.train_hs_short1,auc.train_hs_short2),
+                        Testing = c(auc.test_lda,auc.test_logit,auc.test_hs_long,auc.test_hs_short1,auc.test_hs_short2))
+kable(AUC,format="html",digits=2,caption="AUC")                       
+```
+
+Here we show an example of the prediction results (the last evalution example:2014-12-31) using different methods.
+
+```{r visualize-prob-pred, echo=FALSE, message=FALSE, warning=FALSE, fig.align='center',fig.width=10, fig.height=4.5, cache=TRUE}
+# the last test example
+Pred.test_lda.sub <- predict(Model.lda,subset(TestData[(nrow(TestData)-Ngrids+1):nrow(TestData),],select=-c(Label3c.test)))
+Pred.test_logit.sub <- predict(Model.logit,subset(TestData[(nrow(TestData)-Ngrids+1):nrow(TestData),],select=-c(Label3c.test)),type="response")
+
+jet.colors <- colorRampPalette(c("#00007F", "blue", "#007FFF", "cyan", "#7FFF7F", "yellow", "#FF7F00", "red", "#7F0000"))
+par(mfrow=c(1,2))
+Burglary.df_inCity <- data.frame(X_COORD=RegGrd$X_COORD,Y_COORD=RegGrd$Y_COORD,INC_CNT=BurglaryRaster.df_inCity)
+Burglary.raster_inCity <- rasterize(Burglary.df_inCity[,c("X_COORD","Y_COORD")], r, Burglary.df_inCity$INC_CNT, fun=sum)
+
+KDE.long_raster_inCity <- rasterize(KDE.long_df_inCity[,c("X_COORD","Y_COORD")], r, KDE.long_df_inCity$KS_VAL, fun=sum)
+KDE.short1_raster_inCity <- rasterize(KDE.short1_df_inCity[,c("X_COORD","Y_COORD")], r, KDE.short1_df_inCity$KS_VAL, fun=sum)
+KDE.short2_raster_inCity <- rasterize(KDE.short2_df_inCity[,c("X_COORD","Y_COORD")], r, KDE.short2_df_inCity$KS_VAL, fun=sum)
+
+LDA.df_inCity <- data.frame(X_COORD=RegGrd$X_COORD,Y_COORD=RegGrd$Y_COORD,Posterior=Pred.test_lda.sub$posterior[,2])
+LDA.raster_inCity <- rasterize(LDA.df_inCity[,c("X_COORD","Y_COORD")], r, LDA.df_inCity$Posterior, fun=mean)
+
+Logit.df_inCity <- data.frame(X_COORD=RegGrd$X_COORD,Y_COORD=RegGrd$Y_COORD,ProbPred=Pred.test_logit.sub)
+Logit.raster_inCity <- rasterize(Logit.df_inCity[,c("X_COORD","Y_COORD")], r, Logit.df_inCity$ProbPred, fun=mean)
+
+plot(Burglary.raster_inCity,col=jet.colors(256), main="Rasterized Actual Incident Counts",
+     cex.main=0.75,panel.first=grid(grd.full@grid@cells.dim[2], grd.full@grid@cells.dim[1],col="lightgray", lty="dotted"))
+plot(KDE.long_raster_inCity,col=jet.colors(256), main=paste0("Long-term (", period.long,"-day) Density Probability Prediction"),
+     cex.main=0.75,panel.first=grid(grd.full@grid@cells.dim[2], grd.full@grid@cells.dim[1],col="lightgray", lty="dotted"))
+plot(KDE.short1_raster_inCity,col=jet.colors(256), main=paste0("Short-term (", period.short1,"-day) Density Probability Prediction"),
+     cex.main=0.75,panel.first=grid(grd.full@grid@cells.dim[2], grd.full@grid@cells.dim[1],col="lightgray", lty="dotted"))
+plot(KDE.short2_raster_inCity,col=jet.colors(256), main=paste0("Short-term (", period.short2,"-day) Density Probability Prediction"),
+     cex.main=0.75,panel.first=grid(grd.full@grid@cells.dim[2], grd.full@grid@cells.dim[1],col="lightgray", lty="dotted"))
+plot(LDA.raster_inCity,col=jet.colors(256), main="LDA Probability Prediction",
+     cex.main=0.75,panel.first=grid(grd.full@grid@cells.dim[2], grd.full@grid@cells.dim[1],col="lightgray", lty="dotted"))
+plot(Logit.raster_inCity,col=jet.colors(256), main="Logistic Regression Probability Prediction",
+     cex.main=0.75,panel.first=grid(grd.full@grid@cells.dim[2], grd.full@grid@cells.dim[1],col="lightgray", lty="dotted"))
+```

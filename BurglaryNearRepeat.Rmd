@@ -1,0 +1,132 @@
+---
+title: "Near Repeat Effects"
+date: "June 22, 2015"
+output: html_document
+---
+
+```{r load-data,echo=FALSE, cache=TRUE}
+setwd("/Users/xiaomuliu/CrimeProject/SpatioTemporalModeling/ExploratoryAnalysis/BurglaryAnalysis/")
+source("importCrimeData.R")
+filePath <- "/Users/xiaomuliu/CrimeProject/SpatioTemporalModeling/ExploratoryAnalysis/CPD_DWH/"
+fileName <- "X_BURGLARY_POINTS_08_14.csv"
+BurglaryData <- importCrimeData(filePath,fileName)
+row.names(BurglaryData) <- NULL
+```
+
+The following analyses are all based on the burglary data of year 2014 (As most of the calculations are about pair-wise distances, using 7 year data would be both time and memory demanding).
+
+The two histogram below show the distribution of the times of a house being burglarized during 2014. The right one only shows the histogram of the times of a house being burglarized more than once.
+
+```{r data subset, echo=FALSE, message=FALSE, warning=FALSE, fig.width=10, fig.height=5, cache=TRUE}
+year <- 2014
+# BurglaryData.loc <- subset(BurglaryData,select=c("X_COORD","Y_COORD"))
+BurglaryData.sub <- subset(BurglaryData,YEAR==year,select=c("DATEOCC","X_COORD","Y_COORD"))
+library(plyr)
+# xyfreq <- count(BurglaryData.loc,vars=c("X_COORD","Y_COORD"))
+xyfreq.sub <- count(BurglaryData.sub,vars=c("X_COORD","Y_COORD")) 
+par(mfrow=c(1,2))
+hist(xyfreq.sub$freq,breaks=seq(0,max(xyfreq.sub$freq),by=1),,cex.main=0.75,
+     main="Histogram of exact repeat burglaries",xlab="Repeat times",ylab="Counts")
+hist(xyfreq.sub$freq[xyfreq.sub$freq>1],breaks=seq(1,max(xyfreq.sub$freq),by=1),cex.main=0.75,
+     main="Histogram of exact repeat burglaries (>=2 times)",xlab="Repeat times",ylab="Counts")
+```
+
+For every pair of the burglaries, we calucated their spatial and temporal distances. Then these values are binned into a 2D cell grid in which each cell is the counts of how many burglary pairs fall into this corresponding temporal and spatial distance. 
+
+(The following geography information needs to be further comfirmed. We also need CPD's GIS group's help to figure out how they convert the longitute-latitute values to x-y coordinates.)
+
+North-south geographical distance of Chicago ~= 25 miles. X coordinate range ~= [110000,120500], Y coordinate range ~= [181000,195000]. So one unit of the coordinate system ~= 0.0002 miles.
+
+In the 2D histogram below, the spatial distance resolution is 100 which means the searching radius = 100 ~= 0.02 miles ~= 1/1750 of the diagonal of Chicago land. 
+
+Lots of near-repeated burglaries (exact-repeated ones excluded) happened within 100 spatial units (0.02 miles). 
+
+```{r 2Dhist, echo=FALSE, message=FALSE, warning=FALSE, fig.width=10, fig.height=5, cache=TRUE}
+# 2D histogram (day * radius)
+dateList <- sort(unique(BurglaryData.sub$DATEOCC))
+# X_len = 1e5
+# Y_len = 1.5e5 #~25miles
+X_range <- range(BurglaryData$X_COORD)
+Y_range <- range(BurglaryData$Y_COORD)
+MapDiag <- sqrt((X_range[2]-X_range[1])^2+(Y_range[2]-Y_range[1])^2)
+# diagonal distance ~= 41 miles
+# r = 50 = approximately 1/3500 of the diagonal of Chicago map ~= 0.01 miles
+radius <- 100 
+s.bin <- seq(0,ceiling(MapDiag/100),by=radius)
+
+freq.day <- data.frame(DATE=dateList,matrix(0,length(dateList),length(s.bin)-1))
+for (d in dateList) {
+  DistMat <- as.matrix(dist(as.matrix(subset(BurglaryData.sub,DATEOCC==d,select=c("X_COORD","Y_COORD")))))
+  DistVec <- as.vector(DistMat[lower.tri(DistMat,diag=FALSE)])
+  #freq <- as.data.frame(table(findInterval(DistVec,s.bin)))
+  counts <- hist(DistVec[DistVec<=max(s.bin)],breaks=s.bin,plot=FALSE)$counts
+  freq.day[freq.day$DATE==d,-1] <- counts
+}
+
+histMat = as.matrix(freq.day[,-1])
+nbcol=256
+color <- topo.colors(nbcol)
+# Compute the z-value at the facet centres
+zfacet <- histMat[-1,-1]+histMat[-1,-ncol(histMat)]+histMat[-nrow(histMat),-1]+histMat[-nrow(histMat),-ncol(histMat)]
+# Recode facet z-values into color indices
+facetcol <- cut(zfacet, nbcol)
+par(mfrow=c(1,2))
+persp(histMat,theta=45,phi=45,col=color[facetcol],xlab="Day",
+      ylab=paste("Radius (*",radius," spatial units)",sep=""),zlab="Burglary Counts")
+
+library(fields)
+par(mar=c(5,5,5,7)) 
+image(x=1:nrow(histMat),y=1:ncol(histMat),z=histMat,col=topo.colors(256),
+      xlab="Day",ylab=paste("Radius (*",radius," spatial units)",sep=""))
+box()
+image.plot(x=1:nrow(histMat),y=1:ncol(histMat),z=histMat,col=topo.colors(256),xlab="Day",
+           ylab=paste("Radius (*",radius," spatial units)",sep=""),legend.only=TRUE,legend.width=0.6)
+```
+
+Here in order to validate the near-repeat burglary effect, we implemented the fixed window method introduced in th M. Short's "Measuring and modeling repeat and near-repeat burglary effects". 
+
+Exact-repeat case:
+
+We isolate the order two homes, then count the time interval between the two burglaries for each of these homes. The null hypothesis (red curves) is called random event hypohesis (REH) of which the probability distribution for houses of order $k$ is given by
+$$
+p_k(\tau)=\frac{k}{D+k-1}\prod_{l=0}^{k-2}\frac{D-\tau+l}{D+l}
+$$
+
+```{r exact-repeat-fix-window, echo=FALSE, message=FALSE, warning=FALSE, fig.width=10, fig.height=5, cache=TRUE}
+source("NearRepeatFunctions.R")
+par(mfrow=c(1,2))
+ERhist.d2 <- ExactRepeatTimeIntervalHist(BurglaryData.sub,order=2,plot=TRUE,REH=TRUE,cex.main=0.6)
+ERhist.d3 <- ExactRepeatTimeIntervalHist(BurglaryData.sub,order=3,plot=TRUE,REH=TRUE,cex.main=0.6)
+# ERhist.d4 <- ExactRepeatTimeIntervalHist(BurglaryData.sub,order=4,plot=TRUE,REH=TRUE,cex.main=0.75)
+# ERhist.d5 <- ExactRepeatTimeIntervalHist(BurglaryData.sub,order=5,plot=TRUE,REH=TRUE,cex.main=0.75)
+```
+We see the disagreement is very substantial, with many more evernts occuring at one day interval than predicted by REH.
+
+Near-repeat case:
+
+We first isolate in the data all order one homes within a circle of pre-defined radius, then count the time intervals in a pair-wise fashion.
+```{r near-repeat-fix-window, echo=FALSE, message=FALSE, warning=FALSE, fig.width=10, fig.height=5, cache=TRUE}
+par(mfrow=c(1,2))
+# ptm <- proc.time()
+NRhist.r100 <- NearRepeatTimeIntervalHist(BurglaryData.sub,radius=100,plot=TRUE,REH=TRUE,cex.main=0.6) # 0.02 miles
+# proc.time() - ptm
+NRhist.r1000 <- NearRepeatTimeIntervalHist(BurglaryData.sub,radius=1000,plot=TRUE,REH=TRUE,cex.main=0.6) # 0.2 miles
+# NRhist.r5000 <- NearRepeatTimeIntervalHist(BurglaryData.sub,radius=5000,plot=TRUE,REH=TRUE,cex.main=0.75) # 1 mile
+# NRhist.r25000 <- NearRepeatTimeIntervalHist(BurglaryData.sub,radius=25000,plot=TRUE,REH=TRUE,cex.main=0.75) # 5 miles
+# ptm <- proc.time()
+# NRhist.r500 <- NearRepeatTimeIntervalHist(BurglaryData.sub,radius=1000,plot=TRUE,REH=TRUE,cex.main=0.75)
+# proc.time() - ptm
+```
+ 
+The one day spike does not fade away when the pre-defined physical seperation gets larger. This is because in Short's paper it shows that the burglary rate in Long Beach, CA has no seasonality and is equally likely on every day through the year. While for our data, the figures below show the daily city-wide burglary counts and its autocorrelation in which one-day and seven-day correlations are obvious.
+
+```{r TS-ACF, echo=FALSE, message=FALSE, warning=FALSE, fig.width=10, fig.height=5, cache=TRUE}
+BurglaryData.sub$INC_CNT <- BurglaryData[BurglaryData$YEAR==year,"INC_CNT"]
+TS.day <- aggregate(INC_CNT~DATEOCC, BurglaryData.sub, FUN=sum)
+par(mfrow=c(1,2))
+plot(TS.day$DATEOCC, TS.day$INC_CNT,type="p",pch=16,cex=0.5,col="blue",
+     xlab="DATE",ylab="Burglary Count",main="Daily citywide burglary counts",cex.main=0.75)
+par(cex.main=0.75)
+acf(TS.day$INC_CNT,lag.max=40, col="black", lwd=1.5,
+    main="Autocorrelation of daily citywide burglary counts")
+```

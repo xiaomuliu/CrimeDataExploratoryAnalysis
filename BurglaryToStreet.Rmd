@@ -1,0 +1,53 @@
+---
+title: "BurglaryToMajorStreetDistance"
+output: pdf_document
+date: "July 15, 2015"
+---
+
+```{r load-data,echo=FALSE, cache=TRUE}
+setwd("/Users/xiaomuliu/CrimeProject/SpatioTemporalModeling/ExploratoryAnalysis/BurglaryAnalysis/")
+source("importCrimeData.R")
+filePath <- "/Users/xiaomuliu/CrimeProject/SpatioTemporalModeling/ExploratoryAnalysis/CPD_DWH/"
+fileName <- "X_BURGLARY_POINTS_08_14.csv"
+BurglaryData <- importCrimeData(filePath,fileName)
+row.names(BurglaryData) <- NULL
+```
+
+City major streets
+```{r majorStreets,echo=FALSE,message=FALSE, warning=FALSE, fig.showtext=FALSE, fig.align='center', cache=TRUE}
+library(rgdal)
+streetPath <- "/Users/xiaomuliu/CrimeProject/SpatioTemporalModeling/CPDShapeFiles/new/Major_Streets"
+street.rg <- readOGR(streetPath,"Major_Streets")
+plot(street.rg,main="Major Streets")
+box(which = "plot", lty = "solid")
+```
+
+The distance between a burglary incident and a major street is defined as the point-to-line perpendicular distance. The histogram of the distances between burglaries ('08-'14) and their closest major streets are shown below.
+
+```{r minDist-hist,echo=FALSE,message=FALSE, warning=FALSE, fig.showtext=FALSE, fig.align='center', cache=TRUE}
+library(sp)
+library(rgeos)
+
+BurglaryData$Dist2St <- rep(0,nrow(BurglaryData))
+prj <- proj4string(street.rg)
+YearList <- 2008:2014
+
+# Doing this in loops to prevent from producing a large distance matrix (161738*16065)
+for (i in YearList){
+  for (j in 1:12){
+    BurglaryData.sub <- subset(BurglaryData,YEAR==i&MONTH==j,select=c("DATEOCC","X_COORD","Y_COORD","INC_CNT"))
+    subIdx <- which(BurglaryData$YEAR==i&BurglaryData$MONTH==j)
+    BurglarySub.sp <- SpatialPoints(coords=BurglaryData.sub[,c("X_COORD","Y_COORD")])
+    proj4string(BurglarySub.sp)<-prj
+    
+    DistMat <- gDistance(BurglarySub.sp, street.rg, byid=TRUE)
+    
+    MinDist <- apply(DistMat, 2, min)
+
+    BurglaryData$Dist2St[subIdx] <- MinDist
+  }
+}
+
+hist(BurglaryData$Dist2St,breaks=100,xlab="Distance (ft)", freq=FALSE,cex.main=0.6,
+     main="Histogram of minimal distances between burglary incidents and the nearby major streets")
+```
