@@ -1,2 +1,2 @@
 # ExploratoryAnalysisMarkdown
-R markdown code for exploratory analysis
+R markdown code for exploratory data analysis
